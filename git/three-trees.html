@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Three Trees — a git sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Semantic colour is the whole point here: amber = unstaged, green = staged,
+   slate = identical. Everything else stays quiet so those three read instantly.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --unstaged:#e8a33d; --staged:#6fbf73; --clean:#62798e;
+  --ref:#b08be8; --danger:#e06c6c;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--unstaged)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--ref);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--ref);color:var(--ref)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--ref);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: three lanes, one row per file, connectors carrying the diff.
+   The row grid is shared by the header so cards and lane titles stay locked.
+   ========================================================================= */
+.trees{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden}
+.grid{display:grid;grid-template-columns:1fr 46px 1fr 46px 1fr;align-items:center}
+.lane-head{padding:12px 10px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+.lane-head .t{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;
+  text-transform:uppercase}
+.lane-head .s{font-size:10.5px;color:var(--ink-faint);font-family:var(--code)}
+.lane-head.wd .t{color:var(--unstaged)} .lane-head.ix .t{color:var(--staged)}
+.lane-head.hd .t{color:var(--ref)}
+.row{padding:0;border-bottom:1px solid rgba(46,58,71,.55)}
+.row:last-child{border-bottom:none}
+.cell{padding:9px 10px}
+.card{border:1px solid var(--line);border-radius:var(--r);background:var(--bg);
+  padding:7px 9px;transition:border-color .3s,background .5s}
+.card.flash{background:rgba(176,139,232,.16);border-color:var(--ref)}
+.card .fn{font-family:var(--code);font-size:12.5px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.card .blob{font-family:var(--code);font-size:10.5px;color:var(--ink-faint);letter-spacing:.04em}
+.card.absent{border-style:dashed;opacity:.4}
+.card.absent .fn{color:var(--ink-faint)}
+.card.dirty{border-color:var(--unstaged)}
+.card.new{border-color:var(--staged)}
+.conn{display:flex;justify-content:center;align-items:center;height:100%}
+.conn svg{overflow:visible;cursor:pointer}
+.conn .chip{font-family:var(--code);font-size:11px;font-weight:700}
+.empty{padding:26px 14px;color:var(--ink-faint);font-family:var(--code);font-size:12.5px}
+
+/* --- commit lane --- */
+.commits{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r);padding:12px 4px 4px;overflow-x:auto}
+.commits .cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:0 12px 6px}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:200px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--ref)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--staged)} .log .mod{color:var(--unstaged)}
+.log .err{color:var(--danger)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--ref)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code{font-family:var(--code)}
+
+@media (max-width:620px){
+  .grid{grid-template-columns:1fr 30px 1fr 30px 1fr}
+  .cell{padding:7px 5px} .card{padding:6px}
+  .card .fn{font-size:11px} .lane-head{padding:9px 5px}
+  .lane-head .s{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 01 · Git internals</p>
+  <h1>Your changes live in <em>three</em> places at once</h1>
+  <p class="standfirst">Almost every confusing git command is confusing because it quietly
+  touches one, two, or all three of these trees. Type commands below and watch which
+  ones move.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- three trees -->
+  <div class="trees">
+    <div class="grid">
+      <div class="lane-head wd"><div class="t">Working dir</div><div class="s">your files</div></div>
+      <div class="lane-head"></div>
+      <div class="lane-head ix"><div class="t">Index</div><div class="s">.git/index</div></div>
+      <div class="lane-head"></div>
+      <div class="lane-head hd"><div class="t">HEAD</div><div class="s" id="head-label">main</div></div>
+    </div>
+    <div id="rows"></div>
+  </div>
+
+  <!-- commit history -->
+  <div class="commits">
+    <div class="cap">Commit history</div>
+    <svg id="graph" height="86"></svg>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="git command" placeholder="git status">
+    </div>
+  </div>
+  <p class="hintbar">Try <code>help</code> · <code>edit app.js</code> ·
+  <code>git add .</code> · <code>git reset --hard HEAD~1</code> · ↑ for history ·
+  tap a <code>≠</code> to diff</p>
+
+  <footer>
+    <strong>Engine notes.</strong> Everything below the fold is four separable parts:
+    an immutable <code>state</code>, a registry of pure <code>(state, args) → {state, out}</code>
+    reducers, a parser, and a D3 renderer that only ever diffs state against the DOM.
+    A lesson is data, not code — see <code>LESSON</code>. Swap the reducers and the
+    renderer and the same shell teaches transaction isolation or LSM compaction.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   The three trees are: worktree (a map file→blob), index (same shape), and the
+   tree of the commit HEAD points at. HEAD's tree is *derived*, never stored —
+   that's what makes `reset --soft` vs `--mixed` vs `--hard` legible.
+   ========================================================================= */
+const hex = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
+
+function initialState() {
+  const c = {
+    e3a1f7: { id: "e3a1f7", msg: "Add project skeleton", parent: null,
+              tree: { "README.md": "b71c" } },
+    "9d4c02": { id: "9d4c02", msg: "Add app entry point", parent: "e3a1f7",
+              tree: { "README.md": "b71c", "app.js": "4f0d" } },
+    "5ab8e1": { id: "5ab8e1", msg: "Document setup steps", parent: "9d4c02",
+              tree: { "README.md": "c93a", "app.js": "4f0d" } }
+  };
+  const tip = { ...c["5ab8e1"].tree };
+  return {
+    commits: c,
+    order: ["e3a1f7", "9d4c02", "5ab8e1"],
+    branches: { main: "5ab8e1" },
+    head: "main",
+    index: { ...tip },
+    worktree: { ...tip }
+  };
+}
+
+const headCommit = s => s.commits[s.branches[s.head]];
+const headTree   = s => ({ ...headCommit(s).tree });
+const clone      = s => structuredClone(s);
+const fileNames  = s => [...new Set([
+  ...Object.keys(headTree(s)), ...Object.keys(s.index), ...Object.keys(s.worktree)
+])].sort();
+
+/* Resolve HEAD, HEAD~2, HEAD^, or a commit id prefix. */
+function resolve(s, ref) {
+  if (!ref) return s.branches[s.head];
+  let m = /^HEAD(~(\d+)|(\^+))?$/.exec(ref);
+  if (m) {
+    let back = m[2] ? +m[2] : (m[3] ? m[3].length : 0);
+    let id = s.branches[s.head];
+    while (back-- > 0) {
+      const p = s.commits[id].parent;
+      if (!p) return null;
+      id = p;
+    }
+    return id;
+  }
+  const hit = s.order.find(id => id.startsWith(ref));
+  return hit || null;
+}
+
+/* ============================================================================
+   2. COMMANDS — pure reducers. Each returns {state?, out:[{text,cls}]}.
+   `cls` drives colour in the log only; no reducer ever touches the DOM.
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ out: [line(msg, "err")] });
+
+function targets(s, args) {
+  const paths = args.filter(a => !a.startsWith("-"));
+  if (paths.includes(".")) return Object.keys(s.worktree);
+  return paths;
+}
+
+const REGISTRY = {
+
+  /* Not a git command — this is you, in your editor. Kept in the same
+     registry so the lesson can show that git never sees the keystrokes. */
+  "edit": (s, args) => {
+    const f = args[0];
+    if (!f) return fail("edit: name a file, e.g. edit app.js");
+    const n = clone(s);
+    const existed = f in n.worktree;
+    n.worktree[f] = hex();
+    return { state: n, out: [line(existed ? `edited ${f}` : `created ${f}`, "mod")] };
+  },
+
+  "git add": (s, args) => {
+    const paths = targets(s, args);
+    if (!paths.length) return fail("Nothing specified, nothing added.");
+    const n = clone(s), moved = [];
+    for (const f of paths) {
+      if (!(f in n.worktree)) return fail(`fatal: pathspec '${f}' did not match any files`);
+      if (n.index[f] !== n.worktree[f]) moved.push(f);
+      n.index[f] = n.worktree[f];
+    }
+    return { state: n, out: moved.length
+      ? moved.map(f => line(`staged ${f}  worktree → index`, "add"))
+      : [line("nothing to stage — index already matches", "dim")] };
+  },
+
+  "git restore": (s, args) => {
+    const staged = args.includes("--staged");
+    const paths = targets(s, args);
+    if (!paths.length) return fail("fatal: you must specify path(s) to restore");
+    const n = clone(s), h = headTree(n), out = [];
+    for (const f of paths) {
+      if (staged) {
+        if (f in h) n.index[f] = h[f]; else delete n.index[f];
+        out.push(line(`unstaged ${f}  HEAD → index`, "mod"));
+      } else {
+        if (!(f in n.index)) return fail(`error: pathspec '${f}' did not match any file known to git`);
+        n.worktree[f] = n.index[f];
+        out.push(line(`discarded changes in ${f}  index → worktree`, "mod"));
+      }
+    }
+    return { state: n, out };
+  },
+
+  "git commit": (s, args, raw) => {
+    const m = /-m\s+("([^"]*)"|'([^']*)'|(\S+))/.exec(raw);
+    const msg = (m && (m[2] ?? m[3] ?? m[4])) || "Update files";
+    const h = headTree(s);
+    const same = Object.keys({ ...h, ...s.index })
+      .every(f => h[f] === s.index[f]);
+    if (same) return { out: [line("nothing to commit, working tree clean", "dim")] };
+    const n = clone(s), id = hex() + hex().slice(0, 2);
+    n.commits[id] = { id, msg, parent: n.branches[n.head], tree: { ...n.index } };
+    n.order.push(id);
+    n.branches[n.head] = id;
+    return { state: n, out: [
+      line(`[${n.head} ${id.slice(0, 7)}] ${msg}`, "add"),
+      line("index → new commit; HEAD moves with the branch", "dim")
+    ] };
+  },
+
+  "git status": s => {
+    const h = headTree(s), out = [line(`On branch ${s.head}`, "ok")];
+    const staged = [], unstaged = [], untracked = [];
+    for (const f of fileNames(s)) {
+      const inH = f in h, inI = f in s.index, inW = f in s.worktree;
+      if (inI && !inH) staged.push(`new file:   ${f}`);
+      else if (inI && inH && h[f] !== s.index[f]) staged.push(`modified:   ${f}`);
+      if (inW && inI && s.index[f] !== s.worktree[f]) unstaged.push(`modified:   ${f}`);
+      if (inW && !inI) untracked.push(f);
+    }
+    if (staged.length) {
+      out.push(line("Changes to be committed:", "ok"));
+      staged.forEach(t => out.push(line("  " + t, "add")));
+    }
+    if (unstaged.length) {
+      out.push(line("Changes not staged for commit:", "ok"));
+      unstaged.forEach(t => out.push(line("  " + t, "mod")));
+    }
+    if (untracked.length) {
+      out.push(line("Untracked files:", "ok"));
+      untracked.forEach(t => out.push(line("  " + t, "mod")));
+    }
+    if (!staged.length && !unstaged.length && !untracked.length)
+      out.push(line("nothing to commit, working tree clean", "dim"));
+    return { out };
+  },
+
+  "git diff": (s, args) => {
+    const staged = args.includes("--staged") || args.includes("--cached");
+    const a = staged ? headTree(s) : s.index;
+    const b = staged ? s.index : s.worktree;
+    const out = [];
+    for (const f of fileNames(s)) {
+      if (a[f] === b[f]) continue;
+      if (!(f in b)) continue;
+      out.push(line(`diff --git a/${f} b/${f}`, "ok"));
+      out.push(line(`- blob ${a[f] || "(none)"}`, "err"));
+      out.push(line(`+ blob ${b[f]}`, "add"));
+    }
+    return { out: out.length ? out
+      : [line(staged ? "no staged changes" : "no unstaged changes", "dim")] };
+  },
+
+  "git reset": (s, args) => {
+    const mode = args.find(a => /^--(soft|mixed|hard)$/.test(a)) || "--mixed";
+    const ref = args.find(a => !a.startsWith("-"));
+    const id = resolve(s, ref);
+    if (!id) return fail(`fatal: ambiguous argument '${ref}': unknown revision`);
+    const untracked = Object.fromEntries(
+      Object.entries(s.worktree).filter(([f]) => !(f in s.index)));
+    const n = clone(s);
+    n.branches[n.head] = id;
+    const t = headTree(n), out = [line(`${n.head} → ${id.slice(0, 7)}`, "mod")];
+    if (mode === "--soft")
+      out.push(line("branch pointer only — index and worktree untouched", "dim"));
+    if (mode !== "--soft") { n.index = { ...t }; out.push(line("index reset to HEAD", "mod")); }
+    if (mode === "--mixed") out.push(line("worktree untouched — your edits are now unstaged", "dim"));
+    if (mode === "--hard") {
+      n.worktree = { ...t, ...untracked };
+      out.push(line("worktree reset to HEAD — those edits are gone", "err"));
+      if (Object.keys(untracked).length)
+        out.push(line("(untracked files survive; git clean -df removes those)", "dim"));
+    }
+    return { state: n, out };
+  },
+
+  "git log": s => {
+    const out = [];
+    let id = s.branches[s.head];
+    while (id) {
+      const c = s.commits[id];
+      out.push(line(`${c.id.slice(0, 7)} ${c.msg}`, id === s.branches[s.head] ? "add" : "ok"));
+      id = c.parent;
+    }
+    return { out };
+  },
+
+  "help": () => ({ out: [
+    line("edit <file>              change a file (git isn't watching)", "ok"),
+    line("git status               compare all three trees", "ok"),
+    line("git add <file|.>         worktree → index", "ok"),
+    line("git commit -m \"msg\"      index → new commit", "ok"),
+    line("git restore --staged <f> HEAD → index (unstage)", "ok"),
+    line("git restore <f>          index → worktree (discard)", "ok"),
+    line("git diff [--staged]      show one gap at a time", "ok"),
+    line("git reset [--soft|--mixed|--hard] <ref>", "ok"),
+    line("git log · restart", "ok")
+  ] }),
+
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+REGISTRY["git checkout"] = REGISTRY["git restore"];
+REGISTRY["touch"] = REGISTRY["edit"];
+
+/* ============================================================================
+   3. PARSER — quote-aware tokeniser, then longest-prefix lookup so that
+   "git add" beats "git". Adding a command means adding one registry key.
+   ========================================================================= */
+function tokenize(str) {
+  return (str.match(/"[^"]*"|'[^']*'|\S+/g) || []);
+}
+function dispatch(state, raw) {
+  const tok = tokenize(raw.trim());
+  if (!tok.length) return null;
+  for (const n of [2, 1]) {
+    const key = tok.slice(0, n).join(" ");
+    if (REGISTRY[key]) return REGISTRY[key](state, tok.slice(n).map(t => t.replace(/^["']|["']$/g, "")), raw);
+  }
+  return fail(`${tok[0]}: command not found — try 'help'`);
+}
+
+/* ============================================================================
+   4. RENDERER — pure function of state. D3 joins keyed by filename; the only
+   imperative bit is the flash class, which is a transition, not state.
+   ========================================================================= */
+let previous = null;
+
+function render(s) {
+  const h = headTree(s);
+  const data = fileNames(s).map(name => ({
+    name,
+    wd: s.worktree[name] ?? null,
+    ix: s.index[name] ?? null,
+    hd: h[name] ?? null
+  }));
+
+  d3.select("#head-label").text(`${s.head} @ ${s.branches[s.head].slice(0, 7)}`);
+
+  const rows = d3.select("#rows").selectAll("div.row").data(data, d => d.name);
+  rows.exit().remove();
+
+  const enter = rows.enter().append("div").attr("class", "row grid");
+  ["wd", "conn-a", "ix", "conn-b", "hd"].forEach(k => {
+    if (k.startsWith("conn")) {
+      enter.append("div").attr("class", "cell conn " + k)
+        .append("svg").attr("width", 40).attr("height", 34)
+        .call(g => { g.append("line"); g.append("text").attr("class", "chip"); });
+    } else {
+      enter.append("div").attr("class", "cell " + k)
+        .append("div").attr("class", "card")
+        .call(c => { c.append("div").attr("class", "fn"); c.append("div").attr("class", "blob"); });
+    }
+  });
+
+  const all = enter.merge(rows);
+
+  ["wd", "ix", "hd"].forEach(lane => {
+    all.select(".cell." + lane + " .card")
+      .attr("class", d => {
+        const v = d[lane];
+        if (v === null) return "card absent";
+        let cls = "card";
+        if (lane === "wd" && d.ix !== null && d.wd !== d.ix) cls += " dirty";
+        if (lane === "wd" && d.ix === null) cls += " dirty";
+        if (lane === "ix" && d.ix !== d.hd) cls += " new";
+        return cls;
+      })
+      .call(sel => {
+        sel.select(".fn").text(d => d.name);
+        sel.select(".blob").text(d => d[lane] === null ? "—" : "blob " + d[lane]);
+      });
+  });
+
+  /* connectors: the diff, drawn. amber = unstaged gap, green = staged gap. */
+  const conn = (sel, from, to, colour) => {
+    sel.select("line")
+      .attr("x1", 2).attr("x2", 38).attr("y1", 17).attr("y2", 17)
+      .attr("stroke-width", 1.5)
+      .attr("stroke", d => d[from] === d[to] ? "var(--clean)" : colour)
+      .attr("stroke-dasharray", d => d[from] === d[to] ? "none" : "3 3");
+    sel.select("text")
+      .attr("x", 20).attr("y", 12).attr("text-anchor", "middle")
+      .attr("fill", d => d[from] === d[to] ? "var(--clean)" : colour)
+      .text(d => d[from] === d[to] ? "=" : "\u2260");
+  };
+  all.select(".conn-a svg").call(conn, "wd", "ix", "var(--unstaged)")
+     .on("click", () => run("git diff"));
+  all.select(".conn-b svg").call(conn, "ix", "hd", "var(--staged)")
+     .on("click", () => run("git diff --staged"));
+
+  /* flash whatever blob changed since the last render */
+  if (previous) {
+    data.forEach(d => {
+      const old = previous.find(p => p.name === d.name);
+      ["wd", "ix", "hd"].forEach(lane => {
+        if (!old || old[lane] !== d[lane]) {
+          const node = all.filter(x => x.name === d.name).select(".cell." + lane + " .card").node();
+          if (node) {
+            node.classList.add("flash");
+            setTimeout(() => node.classList.remove("flash"), 480);
+          }
+        }
+      });
+    });
+  }
+  previous = data;
+
+  renderGraph(s);
+}
+
+function renderGraph(s) {
+  const chain = [];
+  let id = s.branches[s.head];
+  while (id) { chain.unshift(s.commits[id]); id = s.commits[id].parent; }
+  const orphans = s.order.filter(i => !chain.find(c => c.id === i))
+    .map(i => s.commits[i]);
+  const all = [...chain, ...orphans].map((c, i) => ({ ...c, i, live: chain.includes(c) }));
+
+  const gap = 108, w = Math.max(320, all.length * gap + 40);
+  const svg = d3.select("#graph").attr("width", w).attr("viewBox", `0 0 ${w} 86`);
+  const x = d => 34 + d.i * gap, y = 52;
+
+  const links = svg.selectAll("line.edge").data(all.filter(d => d.i > 0 && d.live), d => d.id);
+  links.exit().remove();
+  links.enter().append("line").attr("class", "edge").merge(links)
+    .attr("x1", d => x(d) - 12).attr("x2", d => x(d) - gap + 12)
+    .attr("y1", y).attr("y2", y)
+    .attr("stroke", "var(--line)").attr("stroke-width", 1.5);
+
+  const g = svg.selectAll("g.node").data(all, d => d.id);
+  g.exit().remove();
+  const ge = g.enter().append("g").attr("class", "node");
+  ge.append("circle").attr("r", 11).attr("cy", y).attr("stroke-width", 1.5);
+  ge.append("text").attr("class", "id").attr("y", y + 28).attr("text-anchor", "middle")
+    .attr("font-family", "ui-monospace,monospace").attr("font-size", 10);
+  ge.append("text").attr("class", "ref").attr("y", y - 24).attr("text-anchor", "middle")
+    .attr("font-family", "ui-monospace,monospace").attr("font-size", 10.5)
+    .attr("font-weight", 700);
+
+  const merged = ge.merge(g);
+  merged.select("circle").transition().duration(320)
+    .attr("cx", x)
+    .attr("fill", d => d.live ? "var(--panel-2)" : "transparent")
+    .attr("stroke", d => d.live ? "var(--ref)" : "var(--ink-faint)")
+    .attr("opacity", d => d.live ? 1 : .35);
+  merged.select("text.id").transition().duration(320)
+    .attr("x", x).attr("fill", d => d.live ? "var(--ink-faint)" : "var(--ink-faint)")
+    .attr("opacity", d => d.live ? 1 : .4);
+  merged.select("text.id").text(d => d.id.slice(0, 7));
+  merged.select("text.ref").transition().duration(320)
+    .attr("x", x).attr("fill", "var(--ref)");
+  merged.select("text.ref")
+    .text(d => d.id === s.branches[s.head] ? `HEAD → ${s.head}` : "");
+}
+
+/* ============================================================================
+   5. LESSON — data. A new lesson is a new object, not new code.
+   ========================================================================= */
+const LESSON = [
+  { title: "Start by looking",
+    body: `Every file exists in three versions at once: the one on disk, the one
+    git has <strong>staged</strong> for the next commit, and the one in the last commit.
+    Right now all three match, so every connector reads <code>=</code>.`,
+    try: "git status", expect: /^git status/ },
+
+  { title: "Change something",
+    body: `Editing a file only touches the <strong>working directory</strong>. Git doesn't
+    notice, doesn't record anything, and the other two trees don't move. Watch the
+    left connector break.`,
+    try: "edit app.js", expect: /^(edit|touch)\s+app\.js/ },
+
+  { title: "Stage it",
+    body: `<code>git add</code> copies the working version into the
+    <strong>index</strong>. That's all staging is — a copy, one lane to the right.
+    Now the left connector is whole and the right one is broken.`,
+    try: "git add app.js", expect: /^git add/ },
+
+  { title: "Commit it",
+    body: `<code>git commit</code> snapshots <strong>the index</strong> — never your
+    working directory. Anything you didn't stage isn't in the commit, however
+    saved it looks in your editor.`,
+    try: 'git commit -m "Tweak app"', expect: /^git commit/ },
+
+  { title: "Untracked is a fourth state",
+    body: `A brand-new file sits in the working directory with nothing beside it
+    in the index. That's what "untracked" means: git has no earlier version to
+    diff against, so it lists the file and stays out of the way.`,
+    try: "edit notes.md", expect: /^(edit|touch)\s+\S+/ },
+
+  { title: "Unstage without losing work",
+    body: `Stage an edit, then run this. <code>--staged</code> copies
+    <strong>HEAD → index</strong>, moving right to left. Your working file is
+    untouched — the edit survives, it's just no longer queued.`,
+    try: "git restore --staged app.js", expect: /^git (restore|checkout).*--staged/ },
+
+  { title: "Discard, which does lose work",
+    body: `Without <code>--staged</code>, restore copies <strong>index → working
+    directory</strong> and your edit is overwritten. Same verb, opposite direction,
+    very different consequences.`,
+    try: "git restore app.js", expect: /^git (restore|checkout)(?!.*--staged)/ },
+
+  { title: "reset --soft moves one thing",
+    body: `Reset is only confusing until you count trees. <code>--soft</code> moves
+    the branch pointer and stops. Index and working directory stay exactly where
+    they were, so the undone commit's contents are still staged.`,
+    try: "git reset --soft HEAD~1", expect: /^git reset.*--soft/ },
+
+  { title: "reset --mixed moves two",
+    body: `The default. Branch pointer moves, then the index is overwritten from
+    the new HEAD. Your edits survive in the working directory, unstaged.`,
+    try: "git reset --mixed HEAD~1", expect: /^git reset(?!.*--(soft|hard))/ },
+
+  { title: "reset --hard moves all three",
+    body: `Branch, index, and working directory all snap to the target commit.
+    This is the only one that destroys uncommitted work — and the reason the
+    other two flags exist.`,
+    try: "git reset --hard HEAD~1", expect: /^git reset.*--hard/ },
+
+  { title: "Free play",
+    body: `The whole registry is open. <code>help</code> lists it. Every command
+    here does nothing but copy blobs between three maps — that's the entire
+    model, and it's enough to explain most of git's surface.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   6. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw) {
+  if (!raw.trim()) return;
+  log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  if (res.state) state = res.state;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.out?.some(o => o.cls === "err")
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Three trees loaded. Type 'help' for the command list.", "dim");
+</script>
+</body>
+</html>
