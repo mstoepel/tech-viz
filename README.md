@@ -16,8 +16,13 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 | 01 | Databases | [db/transactions.html](db/transactions.html) | Two interleaved transactions; dirty, non-repeatable and phantom reads, row locks, and a serialization failure, one isolation level at a time |
 | 01 | AI systems | [ai/agent-loop.html](ai/agent-loop.html) | The agent loop: the model as a stateless function over the whole context, tool calls and results as text, retries, runtime stop conditions, memory as a tool, compaction |
 | 01 | Observability | [otel/traces.html](otel/traces.html) | OpenTelemetry traces: spans linked by a traceparent header; dropped headers, uninstrumented services, latency attribution, error status, head-based sampling, log correlation |
+| 02 | AI systems | [ai/transformer.html](ai/transformer.html) | Attention as a weighted lookup: scores, causal mask, softmax and temperature, head types (sink, duplicate, induction, pronoun), the residual stream, and the KV cache |
 
-Planned: transformer forward pass, post-training, diffusion models.
+Planned: post-training, diffusion models.
+
+The transformer page is the first numeric-simulation sandbox: the terminal is still there for
+the lesson, but the controls are also clickable and the state is a tiny forward pass rather
+than a command log. Post-training and diffusion should follow that shape.
 
 ## Conventions
 

@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attention, one head at a time — a transformer sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   The selected token is amber. Attention weight is purple, and everything
+   that shows a weight — arcs, bars, heatmap cells — uses the same purple at
+   an opacity equal to the weight, so 0.8 looks the same everywhere.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --sel:#e8a33d; --att:#b08be8; --att-rgb:176,139,232; --kv:#5cc8d6; --ok:#6fbf73; --bad:#e06c6c;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--att)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--att);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--att);color:var(--att)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--att);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the token strip with arcs from the selected token to what
+   it attends to, for one head of one layer. Below it, three views of the
+   same numbers: the scores becoming weights, the whole head as a heatmap,
+   and the residual stream those weights feed.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.controls{display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line);font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.controls .grp{display:flex;gap:4px;align-items:center}
+.controls .grp span{margin-right:4px}
+.pick{padding:3px 8px;font-size:11px}
+.pick.on{border-color:var(--att);color:var(--att);background:rgba(176,139,232,.12)}
+.controls input[type=range]{width:90px;accent-color:var(--att)}
+.headtype{color:var(--att)}
+.strip{position:relative;padding:74px 12px 12px;overflow-x:auto}
+.toks{display:flex;gap:8px;align-items:flex-end;min-height:56px;position:relative;z-index:1}
+.tok{display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer;min-width:44px}
+.tok .w{font-family:var(--code);font-size:12px;padding:4px 8px;border:1.5px solid var(--line);border-radius:var(--r);background:var(--bg);color:var(--ink);transition:border-color .2s,background .2s;white-space:nowrap}
+.tok.sel .w{border-color:var(--sel);color:var(--sel);background:rgba(232,163,61,.1)}
+.tok.future .w{opacity:.3;border-style:dashed}
+.tok.gen .w{border-color:var(--ok)}
+.tok .i{font-family:var(--code);font-size:9px;color:var(--ink-faint)}
+.tok .bar{width:100%;height:5px;background:var(--panel-2);border-radius:2px;overflow:hidden}
+.tok .bar i{display:block;height:100%;background:var(--att);transition:width .3s}
+.tok .p{font-family:var(--code);font-size:9px;color:var(--att);height:11px}
+svg.arcs{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+svg.arcs path{fill:none;stroke:var(--att);stroke-linecap:round}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px;align-items:start}
+table.sm{border-collapse:collapse;width:100%;font-family:var(--code);font-size:11px}
+table.sm th{font-weight:400;color:var(--ink-faint);font-size:10px;letter-spacing:.06em;text-transform:uppercase;text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+table.sm td{padding:4px 6px;border-bottom:1px solid rgba(46,58,71,.5);color:var(--ink-dim);white-space:nowrap}
+table.sm td.n{text-align:right} table.sm tr.sel td{color:var(--sel)}
+table.sm tr.masked td{color:var(--ink-faint);text-decoration:line-through}
+table.sm td .wb{display:inline-block;height:8px;background:var(--att);vertical-align:middle;border-radius:1px;margin-left:4px}
+.sm-foot{font-family:var(--code);font-size:10px;color:var(--ink-faint);padding:6px 12px 10px;line-height:1.6}
+.heat{padding:10px 12px;overflow-x:auto}
+.heat .g{display:grid;gap:2px}
+.heat .c{width:100%;aspect-ratio:1;background:rgba(var(--att-rgb),var(--a));border-radius:2px;min-width:12px}
+.heat .c.masked{background:transparent;outline:1px dashed rgba(46,58,71,.6);outline-offset:-1px}
+.heat .c.selrow{outline:1px solid var(--sel);outline-offset:-1px}
+.heat .l{font-family:var(--code);font-size:8.5px;color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;align-self:center}
+.heat .l.top{writing-mode:vertical-rl;transform:rotate(180deg);justify-self:center;max-height:44px}
+.heat .l.sel{color:var(--sel)}
+.heat-foot{font-family:var(--code);font-size:10px;color:var(--ink-faint);padding:0 12px 10px;line-height:1.6}
+.resid{padding:10px 12px;font-family:var(--code);font-size:11px}
+.resid .row{display:grid;grid-template-columns:38px 1fr 40px;gap:8px;align-items:center;padding:3px 0}
+.resid .row .k{color:var(--ink-faint)} .resid .row.cur .k{color:var(--sel)}
+.resid .row .b{height:8px;background:var(--panel-2);border-radius:2px;overflow:hidden}
+.resid .row .b i{display:block;height:100%;background:var(--att)}
+.resid .row .b i.mlp{background:var(--kv)}
+.resid .row .v{color:var(--ink-dim);text-align:right;font-size:10px}
+.resid .sub{font-size:10px;color:var(--ink-faint);margin:6px 0 4px;text-transform:uppercase;letter-spacing:.08em}
+.resid .src{display:flex;gap:6px;flex-wrap:wrap}
+.resid .src span{border:1px solid var(--line);border-radius:3px;padding:1px 6px;background:rgba(var(--att-rgb),var(--a));color:var(--ink)}
+.kv{padding:10px 12px;font-family:var(--code);font-size:11px;color:var(--ink-dim);border-top:1px solid var(--line)}
+.kv .cells{display:flex;gap:3px;flex-wrap:wrap;margin:4px 0 6px}
+.kv .cells i{display:block;width:10px;height:10px;border-radius:2px;background:var(--kv);opacity:.7}
+.kv .cells i.new{opacity:1;outline:1px solid var(--sel)}
+.kv .cells i.dead{background:var(--line)}
+.kv b{color:var(--ink);font-weight:400}
+.kv .big{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--kv)}
+.kv .big.bad{color:var(--bad)}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:200px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--att)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--ok)} .log .mod{color:var(--sel)} .log .err{color:var(--bad)} .log .a{color:var(--att)} .log .k{color:var(--kv)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--att)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:860px){ .grid3{grid-template-columns:1fr 1fr} .grid3 > .box:last-child{grid-column:1 / -1} }
+@media (max-width:560px){ .grid3{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 02 · AI systems</p>
+  <h1>Attention is a <em>weighted lookup</em> over everything that came before</h1>
+  <p class="standfirst">Every token asks every earlier token one question, turns the answers
+  into weights that sum to one, and mixes their vectors in those proportions. Do that with a
+  few dozen "heads" per layer, stack a few layers, and you have a transformer. Pick a token,
+  a layer, and a head, and watch the numbers.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="box">
+    <div class="cap"><span>One head, one query token</span><span class="st" id="headline"></span></div>
+    <div class="controls">
+      <div class="grp" id="layers"><span>layer</span></div>
+      <div class="grp" id="heads"><span>head</span></div>
+      <div class="grp"><span>temperature</span><input type="range" id="temp" min="0.25" max="4" step="0.25"><span id="tempv"></span></div>
+      <div class="grp"><span>this head behaves like:</span><span class="headtype" id="headtype"></span></div>
+    </div>
+    <div class="strip" id="strip">
+      <svg class="arcs" id="arcs"></svg>
+      <div class="toks" id="toks"></div>
+    </div>
+  </div>
+
+  <div class="grid3">
+    <div class="box">
+      <div class="cap"><span>Scores → softmax → weights</span></div>
+      <table class="sm"><thead><tr><th>key</th><th class="n">score</th><th class="n">e^(s/T)</th><th class="n">weight</th></tr></thead><tbody id="smtab"></tbody></table>
+      <div class="sm-foot" id="smfoot"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>The whole head</span><span class="st">rows: query · cols: key</span></div>
+      <div class="heat" id="heat"></div>
+      <div class="heat-foot">Upper-right is masked: a token may not attend to the future. Each row sums to 1.</div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>Residual stream of the selected token</span></div>
+      <div class="resid" id="resid"></div>
+      <div class="kv" id="kv"></div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="token 7">
+    </div>
+  </div>
+  <p class="hintbar"><code>token 7</code> · <code>layer 2</code> · <code>head 1</code> · <code>temp 0.5</code> ·
+  <code>text the cat sat on the mat . the cat</code> · <code>generate</code> · <code>cache off</code> · <code>help</code>
+  · or click tokens and buttons</p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes, plus clickable controls
+    that issue the same commands. The arithmetic is real: token and position embeddings, a
+    score per (query, key) pair, a causal mask, a softmax with temperature, a weighted sum of
+    value vectors added into a residual stream, an MLP step, and a KV cache with operation
+    counts. What is <em>not</em> real: the scores come from hand-written functions that imitate
+    head types found in trained models (previous-token, sink, local, duplicate, induction,
+    pronoun-to-noun) rather than from learned query/key projections. Tokens are words here;
+    real models use subword pieces.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE + THE TOY MODEL
+   ========================================================================= */
+const L = 4, H = 3, D = 6;
+const HEAD_TYPES = [
+  ["prev", "sink", "local"],
+  ["prev", "dup", "sink"],
+  ["induction", "pronoun", "local"],
+  ["pronoun", "induction", "prev"]
+];
+const TYPE_DESC = {
+  prev: "previous-token head — each token looks one step back",
+  sink: "attention sink — parks on the first token when it has nothing to do",
+  local: "local head — a soft window over the last few tokens",
+  dup: "duplicate-token head — finds earlier copies of the same word",
+  induction: "induction head — finds what followed this word last time",
+  pronoun: "pronoun-to-noun head — moves noun information onto pronouns"
+};
+const NOUNS = new Set(["cat", "mat", "dog", "ball", "sun", "man", "woman", "car", "house", "bird", "fish", "book", "girl", "boy", "tree", "road", "hat", "cup", "moon", "key"]);
+const PRONOUNS = new Set(["it", "he", "she", "they", "him", "her", "them", "its", "his", "their"]);
+
+function hashStr(str) { let h = 0x811c9dc5; for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h; }
+const vec = (seed) => Array.from({ length: D }, (_, k) => ((hashStr(seed + ":" + k) % 2000) / 1000 - 1));
+const norm = v => Math.sqrt(v.reduce((a, x) => a + x * x, 0));
+
+function initialState() {
+  return { text: "The cat sat on the mat because it was tired", layer: 0, head: 0, token: 0, temp: 1,
+           cache: true, gen: [], ops: null };
+}
+const clone = s => structuredClone(s);
+const tokensOf = s => s.text.trim().split(/\s+/).map(t => t.toLowerCase());
+const isGen = (s, i) => i >= tokensOf(s).length - s.gen.length;
+
+/* raw score for query i looking at key j, for a head of the given type */
+function score(type, toks, i, j) {
+  const same = (a, b) => toks[a] === toks[b];
+  switch (type) {
+    case "prev":  return j === i - 1 ? 4 : j === i ? 0.4 : -2;
+    case "sink":  return j === 0 ? 3.5 : j === i ? 0.2 : -1.5;
+    case "local": return -1.1 * (i - j) + (j === i ? -0.6 : 0.8);
+    case "dup":   { const any = toks.slice(0, i).some((t, k) => t === toks[i]); return any ? (j < i && same(i, j) ? 4 : -2) : score("sink", toks, i, j); }
+    case "induction": { const any = toks.slice(0, i).some((t, k) => k > 0 && toks[k - 1] === toks[i]); return any ? (j > 0 && j <= i && toks[j - 1] === toks[i] && j !== i ? 4 : -2) : score("sink", toks, i, j); }
+    case "pronoun": { if (!PRONOUNS.has(toks[i])) return score("prev", toks, i, j); return NOUNS.has(toks[j]) && j < i ? 3 - 0.08 * (i - j) : -2; }
+  }
+}
+
+/* the forward pass: attention weights for every layer/head, and the
+   residual stream of every token layer by layer. */
+function forward(s) {
+  const toks = tokensOf(s), n = toks.length;
+  let x = toks.map((t, i) => vec("tok:" + t).map((v, k) => v + 0.4 * vec("pos:" + i)[k]));
+  const embed = x.map(v => v.slice());
+  const attn = [], resid = toks.map(() => []);
+  for (let l = 0; l < L; l++) {
+    const layerA = [];
+    const deltas = x.map(() => Array(D).fill(0));
+    for (let h = 0; h < H; h++) {
+      const A = [];
+      for (let i = 0; i < n; i++) {
+        const sc = toks.map((_, j) => j <= i ? score(HEAD_TYPES[l][h], toks, i, j) : null);
+        const mx = Math.max(...sc.filter(v => v !== null));
+        const ex = sc.map(v => v === null ? 0 : Math.exp((v - mx) / s.temp));
+        const Z = ex.reduce((a, b) => a + b, 0);
+        const w = ex.map(e => e / Z);
+        A.push({ scores: sc, exps: ex, weights: w });
+        for (let k = 0; k < D; k++) deltas[i][k] += w.reduce((a, wj, j) => a + wj * x[j][k], 0) / H;
+      }
+      layerA.push(A);
+    }
+    attn.push(layerA);
+    x = x.map((v, i) => {
+      const afterAttn = v.map((a, k) => a + 0.5 * deltas[i][k]);
+      const mlp = afterAttn.map(a => 0.35 * Math.tanh(a));
+      resid[i].push({ attn: norm(deltas[i]) * 0.5, mlp: norm(mlp), total: norm(afterAttn.map((a, k) => a + mlp[k])) });
+      return afterAttn.map((a, k) => a + mlp[k]);
+    });
+  }
+  /* rough attribution: average attention from token i to j across all heads and layers, rolled out */
+  const roll = toks.map((_, i) => { const acc = Array(n).fill(0); acc[i] = 1;
+    for (let l = 0; l < L; l++) { const next = Array(n).fill(0);
+      for (let a = 0; a < n; a++) if (acc[a]) for (let h = 0; h < H; h++) attn[l][h][a].weights.forEach((w, j) => next[j] += acc[a] * (0.5 * (a === j ? 1 : 0) + 0.5 * w) / H);
+      const Z = next.reduce((p, q) => p + q, 0); next.forEach((v, j) => acc[j] = v / Z); }
+    return acc; });
+  return { toks, n, attn, resid, embed, final: x, roll };
+}
+
+/* KV cache accounting for one generation step at sequence length n */
+const opsFor = (n, cached) => cached ? { qkv: L * 3, dots: L * H * n, note: `K,V for 1 new token in each of ${L} layers; ${L}·${H}·${n} dot products` }
+                                    : { qkv: L * 3 * n, dots: L * H * (n * (n + 1) / 2), note: `K,V for all ${n} tokens in every layer, from scratch; ${L}·${H}·${n * (n + 1) / 2} dot products` };
+
+/* what the toy model "predicts": induction if it can, else a tiny lexicon */
+function predictNext(toks) {
+  const last = toks[toks.length - 1];
+  for (let k = toks.length - 2; k >= 0; k--) if (toks[k] === last && k + 1 < toks.length - 1) return { tok: toks[k + 1], why: `induction: last time "${last}" was followed by "${toks[k + 1]}"` };
+  const lex = { tired: ".", mat: ".", ".": "the", the: "cat", cat: "sat", sat: "on", on: "the", because: "it", it: "was", was: "tired" };
+  return { tok: lex[last] || "and", why: lex[last] ? "no repeat to copy from — falling back to a stored bigram" : "no idea; emitting a filler" };
+}
+
+/* ============================================================================
+   2. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+
+const REGISTRY = {
+  "token": (s, args) => { const n = tokensOf(s).length, i = +args[0]; if (!(i >= 0 && i < n)) return fail(`token index must be 0–${n - 1}`);
+    const c = clone(s); c.token = i; const f = forward(c), w = f.attn[c.layer][c.head][i].weights;
+    const top = w.map((v, j) => [v, j]).sort((a, b) => b[0] - a[0]).slice(0, 3);
+    return { state: c, out: [line(`token ${i} "${f.toks[i]}" · L${c.layer}H${c.head} attends to: ${top.map(([v, j]) => `${f.toks[j]}(${j}) ${(v * 100).toFixed(0)}%`).join(", ")}`, "a")] }; },
+  "layer": (s, args) => { const l = +args[0]; if (!(l >= 0 && l < L)) return fail(`layer must be 0–${L - 1}`); const c = clone(s); c.layer = l;
+    return { state: c, out: [line(`layer ${l}: heads are ${HEAD_TYPES[l].join(", ")}`, "a")] }; },
+  "head": (s, args) => { const h = +args[0]; if (!(h >= 0 && h < H)) return fail(`head must be 0–${H - 1}`); const c = clone(s); c.head = h;
+    return { state: c, out: [line(`L${c.layer}H${h}: ${TYPE_DESC[HEAD_TYPES[c.layer][h]]}`, "a")] }; },
+  "temp": (s, args) => { const t = parseFloat(args[0]); if (!(t >= 0.25 && t <= 4)) return fail("temperature must be 0.25–4"); const c = clone(s); c.temp = t;
+    return { state: c, out: [line(`temperature ${t}: ${t < 1 ? "sharper — the biggest score takes almost everything" : t > 1 ? "flatter — weights spread out" : "the softmax as trained"}`, "mod")] }; },
+  "text": (s, args, raw) => { const t = raw.trim().replace(/^text\s*/i, ""); const n = t.trim().split(/\s+/).length; if (!t.trim() || n > 16) return fail("give 1–16 words");
+    const c = clone(s); c.text = t; c.gen = []; c.ops = null; c.token = Math.min(c.token, n - 1);
+    return { state: c, out: [line(`${n} tokens: ${tokensOf(c).map((w, i) => `${w}(${i})`).join(" ")}`, "ok")] }; },
+  "generate": s => { const c = clone(s), toks = tokensOf(c), p = predictNext(toks), n = toks.length;
+    if (n >= 16) return fail("sequence is full (16 tokens) — set a shorter text");
+    c.ops = opsFor(n, c.cache); c.text = c.text + " " + p.tok; c.gen.push(p.tok); c.token = n; c.layer = 2; c.head = 0;
+    return { state: c, out: [line(`next token: "${p.tok}"  (${p.why})`, "add"),
+      line(`${c.cache ? "with" : "WITHOUT"} KV cache: ${c.ops.note}`, c.cache ? "k" : "err")] }; },
+  "cache": (s, args) => { if (!/^(on|off)$/.test(args[0] || "")) return fail("usage: cache on|off"); const c = clone(s); c.cache = args[0] === "on";
+    return { state: c, out: [line(`KV cache ${args[0]}`, c.cache ? "k" : "err")] }; },
+  "rollout": s => { const f = forward(s), r = f.roll[s.token];
+    return { out: [line(`where "${f.toks[s.token]}"'s final vector comes from (attention rollout, approximate):`, "dim"),
+      ...r.map((v, j) => [v, j]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([v, j]) => line(`  ${f.toks[j]}(${j})  ${"█".repeat(Math.round(v * 30))} ${(v * 100).toFixed(0)}%`, "a"))] }; },
+  "help": () => ({ out: [
+    line("token N · layer N · head N   pick what to look at (or click)", "ok"),
+    line("temp X                        softmax temperature 0.25–4", "ok"),
+    line("text <words>                  new input, up to 16 tokens", "ok"),
+    line("generate                      append the model's next token; report the cost", "ok"),
+    line("cache on|off                  reuse K,V for old tokens, or recompute everything", "ok"),
+    line("rollout                       rough attribution for the selected token", "ok"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase();
+  if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   3. RENDERER
+   ========================================================================= */
+function render(s) {
+  const f = forward(s), i = s.token, A = f.attn[s.layer][s.head];
+  const w = A[i].weights;
+  const type = HEAD_TYPES[s.layer][s.head];
+  d3.select("#headline").text(`L${s.layer} · H${s.head} · query "${f.toks[i]}" (${i}) · T=${s.temp}`);
+  d3.select("#headtype").text(TYPE_DESC[type]);
+  d3.select("#tempv").text(s.temp.toFixed(2));
+  document.getElementById("temp").value = s.temp;
+
+  /* pickers */
+  const lp = d3.select("#layers").selectAll("button").data(d3.range(L));
+  lp.enter().append("button").attr("class", "pick").on("click", (e, d) => run(`layer ${d}`)).merge(lp).text(d => "L" + d).classed("on", d => d === s.layer);
+  const hp = d3.select("#heads").selectAll("button").data(d3.range(H));
+  hp.enter().append("button").attr("class", "pick").on("click", (e, d) => run(`head ${d}`)).merge(hp).text(d => "H" + d).classed("on", d => d === s.head);
+
+  /* token strip */
+  const tj = d3.select("#toks").selectAll("div.tok").data(f.toks.map((t, j) => ({ t, j, w: w[j], future: j > i, gen: isGen(s, j) })), d => d.j);
+  tj.exit().remove();
+  const te = tj.enter().append("div").attr("class", "tok").on("click", (e, d) => run(`token ${d.j}`));
+  te.append("div").attr("class", "p"); te.append("div").attr("class", "w"); te.append("div").attr("class", "bar").append("i"); te.append("div").attr("class", "i");
+  const tm = te.merge(tj).order().attr("class", d => "tok" + (d.j === i ? " sel" : "") + (d.future ? " future" : "") + (d.gen ? " gen" : ""));
+  tm.select(".w").text(d => d.t); tm.select(".i").text(d => d.j);
+  tm.select(".bar i").style("width", d => d.future ? "0%" : (d.w * 100) + "%");
+  tm.select(".p").text(d => d.future || d.w < 0.02 ? "" : (d.w * 100).toFixed(0) + "%");
+  /* arcs, measured from the DOM */
+  requestAnimationFrame(() => {
+    const strip = document.getElementById("strip"), sr = strip.getBoundingClientRect();
+    const chips = [...strip.querySelectorAll(".tok .w")].map(el => { const r = el.getBoundingClientRect(); return { x: r.left - sr.left + r.width / 2 + strip.scrollLeft, y: r.top - sr.top }; });
+    if (!chips[i] || chips.length !== w.length) return;   /* a newer render has replaced the strip */
+    const paths = w.map((v, j) => ({ j, v })).filter(d => d.j < i && d.v >= 0.02);
+    const pj = d3.select("#arcs").selectAll("path").data(paths, d => d.j);
+    pj.exit().remove();
+    pj.enter().append("path").merge(pj)
+      .attr("d", d => { const a = chips[i], b = chips[d.j]; const lift = Math.min(60, 14 + Math.abs(a.x - b.x) * 0.22); return `M${a.x},${a.y - 2} C${a.x},${a.y - lift} ${b.x},${b.y - lift} ${b.x},${b.y - 2}`; })
+      .attr("stroke-width", d => 1 + 7 * d.v).attr("opacity", d => 0.25 + 0.75 * d.v);
+    d3.select("#arcs").selectAll("path").filter(d => d.j >= i).remove();
+  });
+
+  /* softmax table */
+  const rows = f.toks.map((t, j) => ({ t, j, sc: A[i].scores[j], ex: A[i].exps[j], w: w[j], masked: j > i }));
+  const rj = d3.select("#smtab").selectAll("tr").data(rows, d => d.j);
+  rj.exit().remove();
+  const re = rj.enter().append("tr"); for (let k = 0; k < 4; k++) re.append("td").attr("class", k ? "n" : "");
+  const rm = re.merge(rj).order().attr("class", d => d.masked ? "masked" : d.j === i ? "sel" : null);
+  rm.select("td:nth-child(1)").text(d => `${d.t} (${d.j})`);
+  rm.select("td:nth-child(2)").text(d => d.masked ? "−∞" : d.sc.toFixed(1));
+  rm.select("td:nth-child(3)").text(d => d.masked ? "0" : d.ex.toFixed(2));
+  rm.select("td:nth-child(4)").html(d => d.masked ? "0" : `${d.w.toFixed(2)}<span class="wb" style="width:${d.w * 40}px"></span>`);
+  d3.select("#smfoot").text(`weight_j = e^(score_j / T) / Σ e^(score_k / T) over unmasked k. T = ${s.temp}. Σ weights = ${w.reduce((a, b) => a + b, 0).toFixed(2)}.`);
+
+  /* heatmap */
+  const n = f.n;
+  const cells = [`<div class="l"></div>`, ...f.toks.map((t, j) => `<div class="l top${j === i ? " sel" : ""}">${t}</div>`)];
+  for (let q = 0; q < n; q++) {
+    cells.push(`<div class="l${q === i ? " sel" : ""}">${f.toks[q]}</div>`);
+    for (let k = 0; k < n; k++) {
+      const v = A[q].weights[k];
+      cells.push(k > q ? `<div class="c masked"></div>` : `<div class="c${q === i ? " selrow" : ""}" style="--a:${(0.08 + 0.92 * v).toFixed(2)}" title="${f.toks[q]} → ${f.toks[k]}: ${v.toFixed(2)}"></div>`);
+    }
+  }
+  d3.select("#heat").html(`<div class="g" style="grid-template-columns:52px repeat(${n},1fr)">${cells.join("")}</div>`);
+
+  /* residual stream */
+  const rs = f.resid[i], maxv = Math.max(...rs.map(r => r.total), 1);
+  const roll = f.roll[i];
+  d3.select("#resid").html(
+    `<div class="row"><div class="k">embed</div><div class="b"><i style="width:${norm(f.embed[i]) / maxv * 100}%;background:var(--sel)"></i></div><div class="v">${norm(f.embed[i]).toFixed(2)}</div></div>` +
+    rs.map((r, l) => `<div class="row${l === s.layer ? " cur" : ""}"><div class="k">L${l}</div><div class="b" title="attention added ${r.attn.toFixed(2)}, MLP added ${r.mlp.toFixed(2)}"><i style="width:${r.attn / maxv * 100}%;display:inline-block"></i><i class="mlp" style="width:${r.mlp / maxv * 100}%;display:inline-block"></i></div><div class="v">‖x‖ ${r.total.toFixed(2)}</div></div>`).join("") +
+    `<div class="sub">purple: added by attention · cyan: added by the MLP · x is never overwritten, only added to</div>` +
+    `<div class="sub" style="margin-top:10px">after all layers, "${f.toks[i]}" mostly carries (rollout)</div>` +
+    `<div class="src">${roll.map((v, j) => [v, j]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([v, j]) => `<span style="--a:${(0.1 + 0.9 * v * 2).toFixed(2)}">${f.toks[j]} ${(v * 100).toFixed(0)}%</span>`).join("")}</div>`);
+
+  /* KV cache */
+  const o = s.ops;
+  d3.select("#kv").html(`<div><b>KV cache</b> · ${s.cache ? "on" : "<span style='color:var(--bad)'>off</span>"} · ${n} tokens × ${L} layers</div>
+    <div class="cells">${d3.range(n).map(j => `<i class="${!s.cache ? "dead" : isGen(s, j) && j === n - 1 && s.gen.length ? "new" : ""}" title="K,V for token ${j}"></i>`).join("")}</div>
+    ${o ? `<div>last generate step: <span class="big${s.cache ? "" : " bad"}">${(o.dots).toLocaleString()}</span> dot products, <b>${o.qkv}</b> K/V projections</div><div style="color:var(--ink-faint);font-size:10px">${o.note}</div>`
+        : `<div style="color:var(--ink-faint)">run <b>generate</b> to see what one new token costs</div>`}`);
+}
+
+/* ============================================================================
+   4. LESSON
+   ========================================================================= */
+const at = (s, l, h, t) => s.layer === l && s.head === h && (t === undefined || s.token === t);
+const isDefaultText = s => /^the cat sat on the mat because it was tired$/i.test(s.text.trim());
+const isRepeatText = s => /^the cat sat on the mat \. the cat$/i.test(s.text.trim());
+
+const LESSON = [
+  { title: "Tokens go in as vectors",
+    body: `Each word becomes a vector (its embedding) plus a vector for its position. That's the
+    bottom bar in the residual stream panel. Nothing has looked at anything else yet; every
+    token is alone. Select "cat".`,
+    try: "token 1", expect: /^token 1$/,
+    needs: s => isDefaultText(s) && !(at(s, 0, 0, 1)) },
+
+  { title: "A head is a weighted lookup",
+    body: `Layer 0, head 0. The arcs show where "cat" looks: almost entirely at "the", the token
+    before it. Below, the table shows how: a <strong>score</strong> per earlier token, then
+    <code>e^score</code>, then divided by the sum so they add to 1. Those are the weights. The
+    head's output is the earlier tokens' vectors mixed in those proportions.`,
+    try: "head 0", expect: /^head 0$/, readonly: true,
+    needs: s => isDefaultText(s) && s.token === 1 && s.layer === 0 },
+
+  { title: "Nothing from the future",
+    body: `Select "mat". Its row in the heatmap has entries only up to itself; everything to the
+    right is masked out. This is the causal mask, and it's the whole reason the same model can
+    be trained on a sentence and used to generate one word at a time.`,
+    try: "token 5", expect: /^token 5$/,
+    needs: s => isDefaultText(s) && at(s, 0, 0) && s.token !== 5 },
+
+  { title: "Temperature flattens or sharpens",
+    body: `Raise the temperature to 3. Same scores, divided by a bigger number before the
+    exponential, so the weights spread out. Trained models run at 1; sampling temperature at
+    generation time is this same knob on the final softmax over the vocabulary.`,
+    try: "temp 3", expect: /^temp 3$/,
+    needs: s => isDefaultText(s) && at(s, 0, 0, 5) && s.temp === 1 },
+
+  { title: "…and back",
+    body: `At 0.5 the biggest score takes nearly everything. Reset to 1.`,
+    try: "temp 1", expect: /^temp 1$/,
+    needs: s => s.temp !== 1 },
+
+  { title: "A head with nothing to do",
+    body: `Head 1 on the same layer. Whatever token you pick, the weight lands on "the" at
+    position 0. This is an attention sink: softmax has to put the mass <em>somewhere</em>, and
+    the first token becomes the place heads dump it when they have no opinion. Real models do
+    this so consistently that inference engines special-case it.`,
+    try: "head 1", expect: /^head 1$/,
+    needs: s => isDefaultText(s) && at(s, 0, 0) && s.temp === 1 },
+
+  { title: "Give it something to copy",
+    body: `Replace the input with a sentence that repeats itself, ending in a second "cat".`,
+    try: "text the cat sat on the mat . the cat", expect: /^text the cat sat on the mat \. the cat$/i,
+    needs: s => isDefaultText(s) && at(s, 0, 1) },
+
+  { title: "The duplicate-token head",
+    body: `Layer 1, head 1, last token. It looks straight at the earlier "cat" at position 1.
+    A head like this is half of the most studied circuit in language models.`,
+    try: "layer 1", expect: /^layer 1$/,
+    needs: s => isRepeatText(s) && s.layer !== 1 },
+
+  { title: "…last token",
+    body: `Head 1 is still selected. Pick the final "cat" (position 8): the arc goes straight
+    to the earlier "cat" at position 1.`,
+    try: "token 8", expect: /^token 8$/,
+    needs: s => isRepeatText(s) && s.layer === 1 && s.head === 1 && s.token !== 8 },
+
+  { title: "The induction head",
+    body: `Layer 2, head 0. This one attends not to the earlier "cat" but to the token
+    <strong>after</strong> it: "sat". Read it as a rule: "last time I saw this word, here's what
+    came next". That's the other half of the circuit, and it's what lets a model continue a
+    pattern it has never seen in training.`,
+    try: "layer 2", expect: /^layer 2$/,
+    needs: s => isRepeatText(s) && s.token === 8 && s.layer !== 2 },
+
+  { title: "…head 0",
+    body: `Arc to "sat" at position 2.`,
+    try: "head 0", expect: /^head 0$/,
+    needs: s => isRepeatText(s) && s.token === 8 && s.layer === 2 && s.head !== 0 },
+
+  { title: "So it predicts \"sat\"",
+    body: `Generate one token. The model copies what followed "cat" last time. The new token is
+    outlined in green. Look at the KV panel: with the cache on, one new token needed keys and
+    values computed for itself only; everyone else's were kept from before.`,
+    try: "generate", expect: /^generate$/,
+    needs: s => isRepeatText(s) && s.cache },
+
+  { title: "What the cache is saving",
+    body: `Turn it off and generate again. Every token's K and V in every layer are recomputed,
+    and attention is done for every position, not just the new one. Compare the dot-product
+    counts. The cache is why long contexts cost memory rather than time per token.`,
+    try: "cache off", expect: /^cache off$/,
+    needs: s => s.gen.length === 1 && s.cache },
+
+  { title: "…generate",
+    body: `Same prediction, many times the work.`,
+    try: "generate", expect: /^generate$/,
+    needs: s => s.gen.length === 1 && !s.cache },
+
+  { title: "Cache back on",
+    body: `For the rest of the session.`,
+    try: "cache on", expect: /^cache on$/,
+    needs: s => !s.cache },
+
+  { title: "Heads that move meaning",
+    body: `Back to the original sentence. Layer 2, head 1 is a pronoun head: select "it" (7) and
+    watch it attend to the nouns "cat" and "mat". Resolving what "it" refers to is, mechanically,
+    a head that copies noun vectors onto pronoun positions. Later layers read that copy.`,
+    try: "text The cat sat on the mat because it was tired", expect: /^text the cat sat on the mat because it was tired$/i,
+    needs: s => !isDefaultText(s) && s.cache },
+
+  { title: "…head 1, token 7",
+    body: `Layer 2 is still selected. Pick head 1, then "it".`,
+    try: "head 1", expect: /^head 1$/,
+    needs: s => isDefaultText(s) && s.layer === 2 && s.head !== 1 },
+
+  { title: "…token 7",
+    body: `Two arcs, and almost nothing else: "mat" and "cat" split the weight, "mat" a little
+    heavier because it is closer. Everything that isn't a noun is ignored.`,
+    try: "token 7", expect: /^token 7$/,
+    needs: s => isDefaultText(s) && at(s, 2, 1) && s.token !== 7 },
+
+  { title: "The residual stream is a running sum",
+    body: `Each layer adds to the token's vector; nothing overwrites it. The bars show how much
+    attention and the MLP each added per layer. The rollout underneath is a rough tally of which
+    earlier tokens the final vector is made of. For "it", the answer is: mostly the nouns.`,
+    try: "rollout", expect: /^rollout$/, readonly: true,
+    needs: s => isDefaultText(s) && at(s, 2, 1, 7) },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try your own sentence with a repeated phrase and
+    hunt for the induction head, or set the temperature to 0.25 on the sink head and watch a
+    weight of 1.00 appear.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   5. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("temp").addEventListener("change", e => run(`temp ${e.target.value}`));
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+window.addEventListener("resize", () => render(state));
+
+render(state);
+renderLesson();
+log("Transformer sandbox loaded. Click a token, or type 'help'.", "dim");
+</script>
+</body>
+</html>
