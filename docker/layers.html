@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image layers — a docker sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Semantic colour: amber = built this time, green = pulled from cache,
+   purple = image tag, cyan = a container's writable layer. Dangling = faint.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --new:#e8a33d; --cached:#6fbf73; --tag:#b08be8; --rw:#5cc8d6;
+  --danger:#e06c6c; --dead:#3f4c59;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--new)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--tag);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--tag);color:var(--tag)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--tag);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the Dockerfile and build context on the left, the layer
+   store on the right. One instruction → one layer, and every layer's id is
+   a hash of (parent, instruction, content). That equation is the lesson.
+   ========================================================================= */
+.stage{display:grid;grid-template-columns:300px 1fr;gap:14px;align-items:stretch}
+.side{display:flex;flex-direction:column;gap:14px;min-width:0}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2)}
+table{border-collapse:collapse;width:100%;font-family:var(--code);font-size:11.5px}
+td{padding:6px 10px;border-bottom:1px solid rgba(46,58,71,.55);vertical-align:top;
+  transition:background .5s}
+tr:last-child td{border-bottom:none}
+td.n{color:var(--ink-faint);width:2.2em;text-align:right;padding-right:6px}
+td.txt{color:var(--ink);white-space:pre-wrap;word-break:break-word}
+td.st{width:5.5em;text-align:right;font-size:10px;letter-spacing:.06em;font-weight:700}
+td.st.new{color:var(--new)} td.st.cached{color:var(--cached)} td.st.base{color:var(--ink-faint)}
+tr.miss td.txt{color:var(--new)}
+tr.miss td.txt::after{content:" ← cache broke here";color:var(--new);font-size:10px;opacity:.85}
+td.flash{background:rgba(176,139,232,.16)}
+td.h{color:var(--ink-faint)} td.sz{color:var(--ink-faint);text-align:right;white-space:nowrap}
+.ctx td.txt{color:var(--ink-dim)}
+.scroller{overflow:auto;flex:1;max-height:560px}
+#tree{display:block}
+#tree text{font-family:var(--code)}
+#tree .layer rect.body{fill:var(--bg);stroke-width:1.2}
+#tree .layer text.instr{font-size:10.5px;fill:var(--ink)}
+#tree .layer text.meta{font-size:9.5px;fill:var(--ink-faint)}
+#tree .layer text.chip{font-size:8.5px;font-weight:700;letter-spacing:.06em}
+#tree .layer.flash rect.body{fill:rgba(176,139,232,.25)}
+#tree .layer.dead{opacity:.3}
+#tree .layer.container rect.body{stroke-dasharray:4 3;fill:rgba(92,200,214,.06)}
+#tree .pill rect{rx:3;ry:3;fill:var(--tag)}
+#tree .pill text{font-size:9.5px;font-weight:700;fill:#12181f}
+#tree .sizebar{fill:var(--line)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;padding:6px 12px 10px;
+  font-family:var(--code);font-size:11px;color:var(--ink-faint);border-top:1px solid var(--line)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;
+  vertical-align:-1px;border:1.5px solid currentColor}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--tag)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--cached)} .log .mod{color:var(--new)} .log .err{color:var(--danger)}
+.log .tag{color:var(--tag)} .log .rw{color:var(--rw)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--tag)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:760px){
+  .stage{grid-template-columns:1fr}
+  .scroller{max-height:420px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 01 · Containers</p>
+  <h1>An image is a <em>cache</em> with a name on top</h1>
+  <p class="standfirst">Every Dockerfile instruction becomes one layer, and every layer's
+  id is a hash of its parent, the instruction, and the files it touched. Change any of
+  those and that layer, plus everything above it, gets rebuilt. Edit, build, and watch
+  where the cache breaks.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="side">
+      <div class="box">
+        <div class="cap">Dockerfile</div>
+        <table><tbody id="dockerfile"></tbody></table>
+      </div>
+      <div class="box ctx">
+        <div class="cap">Build context · what COPY can see</div>
+        <table><tbody id="context"></tbody></table>
+      </div>
+    </div>
+    <div class="box">
+      <div class="cap">Layer store · base at the bottom, newest on top</div>
+      <div class="scroller" id="scroller"><svg id="tree" role="img" aria-label="image layer tree"></svg></div>
+      <div class="legend">
+        <span><i style="color:var(--new)"></i>built this time</span>
+        <span><i style="color:var(--cached)"></i>from cache</span>
+        <span><i style="color:var(--tag)"></i>image tag</span>
+        <span><i style="color:var(--rw);border-style:dashed"></i>container (writable)</span>
+        <span><i style="color:var(--dead)"></i>dangling</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="docker command" placeholder="docker build -t app .">
+    </div>
+  </div>
+  <p class="hintbar">Try <code>help</code> · <code>edit src/app.js</code> ·
+  <code>docker build -t app .</code> · <code>swap 3 4</code> · <code>docker history app</code> ·
+  <code>docker image prune</code> · ↑ for history</p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the
+    <a href="../git/three-trees.html">git sandboxes</a>: immutable <code>state</code>, pure
+    reducers, a D3 renderer, a <code>LESSON</code> array. Layer ids here really are
+    content-addressed — the same Dockerfile and context always hash to the same ids, which
+    is the only reason a cache can work at all. Sizes are illustrative.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   layers:     id → {id, parent, instr, size, kind, files?, built}
+               `id` is hash(parent, instr, content) — content-addressed, so a
+               cache hit is just "does a layer with this id already exist".
+   images:     tag → top layer id.
+   containers: name → {name, image, top, rw:{file→hash}}.
+   dockerfile: array of instruction strings.  context: file → {hash, size}.
+   lastBuild:  what the renderer annotates the Dockerfile with.
+   ========================================================================= */
+const hex = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
+function hashStr(str) {                              /* FNV-1a, 6 hex chars */
+  let h = 0x811c9dc5;
+  for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, "0").slice(0, 6);
+}
+const MB = 1e6, KB = 1e3;
+
+function initialState() {
+  const base1 = { id: "d2f1a0", parent: null,     instr: "ADD debian bookworm-slim rootfs", size: 74.8 * MB, kind: "base", built: 0 };
+  const base2 = { id: "7c9e44", parent: "d2f1a0", instr: "RUN install node 20",           size: 112 * MB,  kind: "base", built: 0 };
+  return {
+    layers: { [base1.id]: base1, [base2.id]: base2 },
+    order: [base1.id, base2.id],
+    images: { "node:20-slim": base2.id },
+    containers: {},
+    dockerfile: ["FROM node:20-slim", "WORKDIR /app", "COPY . .", "RUN npm install", 'CMD ["node","src/app.js"]'],
+    context: {
+      "package.json": { hash: "5d1c", size: 412 },
+      "src/app.js":   { hash: "a9e2", size: 2130 },
+      "README.md":    { hash: "0b77", size: 1180 }
+    },
+    buildSeq: 0,
+    lastBuild: null
+  };
+}
+
+const clone = s => structuredClone(s);
+const short = id => id.slice(0, 7);
+const fmt = b => b === 0 ? "0B" : b >= MB ? (b / MB).toFixed(1) + "MB" : b >= KB ? (b / KB).toFixed(1) + "kB" : b + "B";
+const normTag = t => t.includes(":") ? t : t + ":latest";
+
+function chain(s, id) { const out = []; while (id) { out.push(id); id = s.layers[id]?.parent; } return out; }
+const imageSize = (s, id) => chain(s, id).reduce((a, l) => a + s.layers[l].size, 0);
+
+/* Layers something still names: every image tag's chain, every container's. */
+function reachable(s) {
+  const out = new Set();
+  [...Object.values(s.images), ...Object.values(s.containers).map(c => c.top)]
+    .forEach(t => chain(s, t).forEach(id => out.add(id)));
+  return out;
+}
+
+/* Which context files a COPY source matches: ".", a file, or a dir prefix. */
+function matchContext(ctx, src) {
+  const names = Object.keys(ctx).sort();
+  if (src === "." || src === "./") return names;
+  const clean = src.replace(/^\.\//, "").replace(/\/$/, "");
+  return names.filter(f => f === clean || f.startsWith(clean + "/"));
+}
+
+/* ----------------------------------------------------------------------------
+   The build plan. Pure: walks the Dockerfile against the current store and
+   says, for every instruction, which layer id it produces and whether that
+   layer already exists. `docker build` just materialises the misses.
+   ------------------------------------------------------------------------- */
+function plan(s) {
+  const steps = []; let parent = null, firstMiss = null;
+  for (let i = 0; i < s.dockerfile.length; i++) {
+    const line = s.dockerfile[i];
+    const [verb, ...rest] = line.trim().split(/\s+/);
+    const V = verb.toUpperCase();
+    if (V === "FROM") {
+      const base = s.images[normTag(rest[0] || "")] ?? s.images[rest[0]];
+      if (!base) return { error: `failed to solve: ${rest[0]}: image not found locally (this sandbox has node:20-slim pulled; other bases need a local tag)` };
+      parent = base; steps.push({ i, line, id: base, cached: true, from: true });
+      continue;
+    }
+    let content = "", files = null, size = 0;
+    if (V === "COPY" || V === "ADD") {
+      const src = rest[0];
+      const matched = matchContext(s.context, src);
+      if (!src || !matched.length) return { error: `failed to compute cache key: "${src ?? ""}": not found in build context` };
+      files = matched.map(f => [f, s.context[f].hash]);
+      content = files.map(x => x.join("=")).join(",");
+      size = matched.reduce((a, f) => a + s.context[f].size, 0);
+    } else if (V === "RUN") {
+      size = (/npm (ci|install)/.test(line) ? 40 : 4) * MB + (parseInt(hashStr(line), 16) % 20) * MB;
+    }
+    const id = hashStr(`${parent}|${line}|${content}`);
+    const cached = id in s.layers;
+    if (!cached && firstMiss === null) firstMiss = i;
+    steps.push({ i, line, id, cached, size, files, parentCached: steps[steps.length - 1]?.cached ?? true,
+                 verb: V, seenInstr: Object.values(s.layers).some(l => l.instr === line) });
+    parent = id;
+  }
+  return { steps, firstMiss, top: parent };
+}
+
+/* ============================================================================
+   2. COMMANDS — pure reducers, {state?, out:[{text,cls}], error?}
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const positional = args => args.filter(a => !a.startsWith("-"));
+const flag = (args, f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };
+
+const REGISTRY = {
+
+  /* --- you, in your editor. Docker isn't watching. --- */
+  "edit": (s, args) => {
+    const f = args[0];
+    if (!f) return fail("edit: name a file, e.g. edit src/app.js");
+    if (f === "Dockerfile") return fail("edit Dockerfile: use line / insert / delete / swap for the Dockerfile");
+    const n = clone(s), existed = f in n.context;
+    n.context[f] = { hash: hex(), size: existed ? n.context[f].size : 800 + Math.floor(Math.random() * 3000) };
+    return { state: n, out: [line(`${existed ? "edited" : "created"} ${f}  (context hash → ${n.context[f].hash})`, "mod"),
+                             line("nothing in the layer store moved — a build hasn't happened", "dim")] };
+  },
+  "rm": (s, args) => {
+    const f = args[0];
+    if (!(f in s.context)) return fail(`rm: ${f}: No such file`);
+    const n = clone(s); delete n.context[f];
+    return { state: n, out: [line(`deleted ${f} from the build context`, "mod")] };
+  },
+  "ls": s => ({ out: Object.keys(s.context).sort().map(f => line(`${f.padEnd(16)} ${s.context[f].hash}  ${fmt(s.context[f].size)}`)) }),
+
+  /* --- Dockerfile editing --- */
+  "cat": (s, args) => args[0] === "Dockerfile" || !args[0]
+    ? { out: s.dockerfile.map((l, i) => line(`${String(i + 1).padStart(2)}  ${l}`)) }
+    : (s.context[args[0]] ? { out: [line(`(content ${s.context[args[0]].hash}, ${fmt(s.context[args[0]].size)})`, "dim")] } : fail(`cat: ${args[0]}: No such file`)),
+  "line": (s, args, raw) => {
+    const m = /^line\s+(\d+)\s+(.+)$/.exec(raw.trim());
+    if (!m) return fail("usage: line <n> <instruction>");
+    const i = +m[1] - 1;
+    if (i < 0 || i >= s.dockerfile.length) return fail(`line ${m[1]}: Dockerfile has ${s.dockerfile.length} lines`);
+    const n = clone(s); n.dockerfile[i] = m[2];
+    return { state: n, out: [line(`Dockerfile line ${m[1]} is now: ${m[2]}`, "mod")] };
+  },
+  "insert": (s, args, raw) => {
+    const m = /^insert\s+(\d+)\s+(.+)$/.exec(raw.trim());
+    if (!m) return fail("usage: insert <n> <instruction>   (becomes line n)");
+    const i = +m[1] - 1;
+    if (i < 0 || i > s.dockerfile.length) return fail(`insert ${m[1]}: out of range`);
+    const n = clone(s); n.dockerfile.splice(i, 0, m[2]);
+    return { state: n, out: [line(`inserted at line ${m[1]}: ${m[2]}`, "mod"), line("later lines shifted down by one", "dim")] };
+  },
+  "delete": (s, args) => {
+    const i = +args[0] - 1;
+    if (!(i >= 0 && i < s.dockerfile.length)) return fail("usage: delete <n>");
+    const n = clone(s); const [gone] = n.dockerfile.splice(i, 1);
+    return { state: n, out: [line(`deleted line ${args[0]}: ${gone}`, "mod")] };
+  },
+  "swap": (s, args) => {
+    const a = +args[0] - 1, b = +args[1] - 1, L = s.dockerfile.length;
+    if (!(a >= 0 && a < L && b >= 0 && b < L) || a === b) return fail("usage: swap <n> <m>");
+    const n = clone(s); [n.dockerfile[a], n.dockerfile[b]] = [n.dockerfile[b], n.dockerfile[a]];
+    return { state: n, out: [line(`swapped lines ${args[0]} and ${args[1]}`, "mod")] };
+  },
+
+  /* --- docker --- */
+  "docker build": (s, args) => {
+    const tag = normTag(flag(args, "-t") || flag(args, "--tag") || "app");
+    const p = plan(s);
+    if (p.error) return fail(p.error);
+    const n = clone(s); n.buildSeq++;
+    const out = [line(`[+] Building ${tag}`, "ok")];
+    const N = p.steps.length;
+    let built = 0, reused = 0;
+    p.steps.forEach(st => {
+      const k = `[${st.i + 1}/${N}]`;
+      if (st.from) { out.push(line(` => ${k} ${st.line.padEnd(30)} base    ${short(st.id)}`, "dim")); return; }
+      if (st.cached) { reused++; out.push(line(` => CACHED ${k} ${st.line.padEnd(30)} ${short(st.id)}`, "add")); return; }
+      built++;
+      n.layers[st.id] = { id: st.id, parent: p.steps[p.steps.indexOf(st) - 1].id, instr: st.line, size: st.size,
+                          kind: "build", files: st.files, built: n.buildSeq };
+      n.order.push(st.id);
+      out.push(line(` => NEW    ${k} ${st.line.padEnd(30)} ${short(st.id)}  ${fmt(st.size)}`, "mod"));
+    });
+    const prevTop = s.images[tag];
+    n.images[tag] = p.top;
+    n.lastBuild = { tag, seq: n.buildSeq, steps: p.steps.map(({ i, id, cached, from }) => ({ i, id, cached, from })), firstMiss: p.firstMiss };
+    out.push(line(` => naming to ${tag}  →  ${short(p.top)}  (${fmt(imageSize(n, p.top))})`, "tag"));
+    if (p.firstMiss === null) {
+      out.push(line(`${reused} layers reused, 0 built — same inputs, same hashes, same image${prevTop === p.top ? " id" : ""}`, "dim"));
+    } else {
+      const st = p.steps[p.firstMiss];
+      const why = !st.seenInstr ? "that instruction is new or edited"
+        : (st.verb === "COPY" || st.verb === "ADD") && st.parentCached ? "the files it copies changed, so its content hash changed"
+        : "its parent layer is different — a miss above invalidates everything below it";
+      out.push(line(`${reused} reused, ${built} built. Cache broke at line ${p.firstMiss + 1} because ${why}.`, "dim"));
+    }
+    return { state: n, out };
+  },
+
+  "docker images": s => ({ out: [line("REPOSITORY        TAG        IMAGE ID   SIZE", "dim"),
+    ...Object.keys(s.images).sort().map(t => {
+      const [repo, tg] = t.split(":");
+      return line(`${repo.padEnd(17)} ${tg.padEnd(10)} ${short(s.images[t])}    ${fmt(imageSize(s, s.images[t]))}`, "tag");
+    })] }),
+
+  "docker history": (s, args) => {
+    const tag = normTag(positional(args)[0] || "app");
+    if (!s.images[tag]) return fail(`Error: No such image: ${tag}`);
+    return { out: [line("IMAGE     CREATED BY                          SIZE", "dim"),
+      ...chain(s, s.images[tag]).map(id => {
+        const l = s.layers[id];
+        return line(`${short(id)}   ${l.instr.padEnd(35)} ${fmt(l.size)}`, l.kind === "base" ? "dim" : "ok");
+      }), line("read top-down: each row is one layer, newest first", "dim")] };
+  },
+
+  "docker run": (s, args) => {
+    const name = flag(args, "--name") || "c" + hex().slice(0, 3);
+    const tag = normTag(positional(args.filter((a, i) => args[i - 1] !== "--name"))[0] || "");
+    if (!s.images[tag]) return fail(`Unable to find image '${tag}' locally`);
+    if (s.containers[name]) return fail(`Error: the container name "/${name}" is already in use`);
+    const n = clone(s);
+    n.containers[name] = { name, image: tag, top: n.images[tag], rw: {} };
+    return { state: n, out: [
+      line(`${name}  running from ${tag} (${short(n.images[tag])})`, "rw"),
+      line("one thin writable layer on top; every image layer below is read-only and shared", "dim")
+    ] };
+  },
+  "docker exec": (s, args) => {
+    const [name, cmd, file] = args;
+    const c = s.containers[name];
+    if (!c) return fail(`Error: No such container: ${name}`);
+    if (!/^(edit|touch|rm)$/.test(cmd || "") || !file) return fail("usage: docker exec <container> edit|touch|rm <file>");
+    const n = clone(s), rel = file.replace(/^\/app\//, "");
+    const inImage = chain(s, c.top).some(id => (s.layers[id].files || []).some(([f]) => f === rel));
+    if (cmd === "rm") { n.containers[name].rw[rel] = null;
+      return { state: n, out: [line(`${name}: ${rel} hidden with a whiteout in the writable layer`, "rw"), line("the image layer that has it is untouched — deletion is an overlay, not a removal", "dim")] }; }
+    n.containers[name].rw[rel] = hex();
+    return { state: n, out: [
+      line(`${name}: wrote ${rel} in the writable layer`, "rw"),
+      line(inImage ? "copy-on-write: the file was copied up from its image layer first, and the copy was edited"
+                   : "new file; it exists only in this container's layer", "dim")
+    ] };
+  },
+  "docker commit": (s, args) => {
+    const [name, tagRaw] = positional(args);
+    const c = s.containers[name];
+    if (!c) return fail(`Error: No such container: ${name}`);
+    const tag = normTag(tagRaw || `${name}-snapshot`);
+    const files = Object.entries(c.rw);
+    const n = clone(s);
+    const id = hashStr(`${c.top}|commit|${files.map(x => x.join("=")).join(",")}|${n.buildSeq}`);
+    n.layers[id] = { id, parent: c.top, instr: `COMMIT from container ${name}`, size: files.filter(([, h]) => h).length * 1.5 * KB,
+                     kind: "commit", files: files.filter(([, h]) => h), built: ++n.buildSeq };
+    n.order.push(id); n.images[tag] = id;
+    n.lastBuild = null;
+    return { state: n, out: [
+      line(`sha256:${id}…  →  ${tag}`, "tag"),
+      line(`the writable layer was frozen into a read-only one (${files.length} file(s)); the container keeps running on its own copy`, "dim")
+    ] };
+  },
+  "docker ps": s => ({ out: [line("CONTAINER   IMAGE        CHANGED FILES", "dim"),
+    ...Object.values(s.containers).map(c => line(`${c.name.padEnd(11)} ${c.image.padEnd(12)} ${Object.keys(c.rw).length}`, "rw"))] }),
+  "docker rm": (s, args) => {
+    const name = positional(args)[0];
+    if (!s.containers[name]) return fail(`Error: No such container: ${name}`);
+    const n = clone(s); delete n.containers[name];
+    return { state: n, out: [line(`${name} removed — its writable layer is gone for good`, "mod")] };
+  },
+  "docker rmi": (s, args) => {
+    const tag = normTag(positional(args)[0] || "");
+    if (!s.images[tag]) return fail(`Error: No such image: ${tag}`);
+    const used = Object.values(s.containers).find(c => c.image === tag);
+    if (used && !args.includes("-f")) return fail(`Error: conflict: image ${tag} is being used by container ${used.name} (use -f)`);
+    const n = clone(s); delete n.images[tag];
+    return { state: n, out: [line(`Untagged: ${tag}`, "mod"), line("only the name went away; layers nothing else reaches are now dangling", "dim")] };
+  },
+  "docker image": (s, args) => {
+    if (args[0] !== "prune") return fail("usage: docker image prune");
+    const live = reachable(s), n = clone(s);
+    const dead = s.order.filter(id => !live.has(id));
+    if (!dead.length) return { out: [line("Total reclaimed space: 0B", "dim")] };
+    let bytes = 0;
+    dead.forEach(id => { bytes += s.layers[id].size; delete n.layers[id]; });
+    n.order = n.order.filter(id => live.has(id));
+    return { state: n, out: [...dead.map(id => line(`deleted: ${short(id)}  ${s.layers[id].instr}`, "mod")),
+      line(`Total reclaimed space: ${fmt(bytes)}`, "ok"),
+      line("a layer no tag or container reaches is garbage — same rule as an unreachable git commit", "dim")] };
+  },
+
+  "help": () => ({ out: [
+    line("edit <file> · rm <file> · ls          change the build context (docker isn't watching)", "ok"),
+    line("cat Dockerfile                       print it with line numbers", "ok"),
+    line("line <n> <instr> · insert <n> <instr> · delete <n> · swap <n> <m>", "ok"),
+    line("docker build [-t tag] .              walk the Dockerfile; hit or miss per layer", "ok"),
+    line("docker images · docker history <tag>", "ok"),
+    line("docker run --name <c> <tag>          a writable layer on top of an image", "ok"),
+    line("docker exec <c> edit|rm <file>        copy-on-write inside that layer", "ok"),
+    line("docker commit <c> <tag>              freeze the writable layer into an image", "ok"),
+    line("docker rm <c> · docker rmi <tag> · docker image prune", "ok"),
+    line("restart", "dim")
+  ] }),
+
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+REGISTRY["touch"] = REGISTRY["edit"];
+
+/* ============================================================================
+   3. PARSER — quote-aware tokeniser, longest-prefix lookup.
+   ========================================================================= */
+function tokenize(str) { return (str.match(/"[^"]*"|'[^']*'|\S+/g) || []); }
+function dispatch(state, raw) {
+  const tok = tokenize(raw.trim());
+  if (!tok.length) return null;
+  for (const n of [2, 1]) {
+    const key = tok.slice(0, n).join(" ");
+    if (REGISTRY[key]) return REGISTRY[key](state, tok.slice(n).map(t => t.replace(/^["']|["']$/g, "")), raw);
+  }
+  return fail(`${tok[0]}: command not found — try 'help'`);
+}
+
+/* ============================================================================
+   4. RENDERER
+   The store is a tree: a cache miss forks a new column to the right. Columns
+   are assigned like git lanes — first child keeps its parent's column, later
+   children start a new one — so "rebuilt from here" reads as a fork.
+   ========================================================================= */
+const COLW = 206, ROWH = 60, BOXW = 182, BOXH = 40, PAD = 16;
+let prevIds = null, prevCtx = null, prevDf = null;
+
+function layout(s) {
+  const live = reachable(s);
+  const nodes = s.order.map(id => ({ ...s.layers[id], kind: s.layers[id].kind, live: live.has(id) }));
+  Object.values(s.containers).forEach(c => nodes.push({
+    id: "container:" + c.name, parent: c.top, instr: `container ${c.name}`, kind: "container",
+    size: 0, live: true, rw: c.rw
+  }));
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const kids = new Map(nodes.map(n => [n.id, []]));
+  nodes.forEach(n => { if (n.parent && kids.has(n.parent)) kids.get(n.parent).push(n); });
+  /* Live children first, so whatever a tag still names keeps the leftmost
+     column and superseded builds get pushed aside to the right. */
+  const idx = new Map(nodes.map((n, i) => [n.id, i]));
+  let nextCol = 0;
+  const assign = (n, col, depth) => {
+    n.col = col; n.depth = depth;
+    kids.get(n.id).sort((a, b) => (b.live - a.live) || (idx.get(a.id) - idx.get(b.id)))
+      .forEach((k, i) => assign(k, i === 0 ? col : ++nextCol, depth + 1));
+  };
+  nodes.filter(n => !n.parent || !byId.has(n.parent)).forEach((r, i) => assign(r, i === 0 ? 0 : ++nextCol, 0));
+  return { nodes, byId };
+}
+
+function render(s) {
+  const { nodes, byId } = layout(s);
+  const maxDepth = Math.max(...nodes.map(n => n.depth)), maxCol = Math.max(...nodes.map(n => n.col));
+  const W = PAD * 2 + (maxCol + 1) * COLW - (COLW - BOXW);
+  const H = PAD + 22 + (maxDepth + 1) * ROWH;
+  const x = d => PAD + d.col * COLW;
+  const y = d => H - PAD - BOXH - d.depth * ROWH;
+  const svg = d3.select("#tree").attr("width", W).attr("height", H).attr("viewBox", `0 0 ${W} ${H}`);
+  const T = d3.transition().duration(320);
+  const lb = s.lastBuild;
+  const status = d => {
+    if (d.kind === "container") return null;
+    if (!lb) return null;
+    const st = lb.steps.find(t => t.id === d.id && !t.from);
+    return st ? (st.cached ? "CACHED" : "NEW") : null;
+  };
+  const stroke = d => d.kind === "container" ? "var(--rw)" : !d.live ? "var(--dead)"
+    : status(d) === "NEW" ? "var(--new)" : status(d) === "CACHED" ? "var(--cached)" : "var(--ink-faint)";
+
+  /* edges: parent top-centre → child bottom-centre */
+  const edges = nodes.filter(n => n.parent && byId.has(n.parent)).map(n => ({ key: n.id, c: n, p: byId.get(n.parent) }));
+  const path = e => {
+    const x1 = x(e.p) + BOXW / 2, y1 = y(e.p), x2 = x(e.c) + BOXW / 2, y2 = y(e.c) + BOXH;
+    return `M${x1},${y1} C${x1},${y1 - ROWH * .45} ${x2},${y2 + ROWH * .45} ${x2},${y2}`;
+  };
+  const ed = svg.selectAll("path.edge").data(edges, d => d.key);
+  ed.exit().remove();
+  ed.enter().append("path").attr("class", "edge").attr("fill", "none").attr("stroke-width", 1.4)
+    .attr("d", path).attr("opacity", 0)
+    .merge(ed).transition(T).attr("d", path)
+    .attr("stroke", d => d.c.kind === "container" ? "var(--rw)" : d.c.live ? "var(--line)" : "var(--dead)")
+    .attr("stroke-dasharray", d => d.c.kind === "container" ? "4 3" : null)
+    .attr("opacity", d => d.c.live ? 1 : .4);
+
+  /* layer boxes */
+  const nd = svg.selectAll("g.layer").data(nodes, d => d.id);
+  nd.exit().remove();
+  const ne = nd.enter().append("g").attr("class", "layer")
+    .attr("transform", d => `translate(${x(d)},${y(d)})`).attr("opacity", 0);
+  ne.append("rect").attr("class", "body").attr("width", BOXW).attr("height", BOXH).attr("rx", 4);
+  ne.append("rect").attr("class", "sizebar").attr("x", 1).attr("y", BOXH - 3).attr("height", 2);
+  ne.append("text").attr("class", "instr").attr("x", 8).attr("y", 16);
+  ne.append("text").attr("class", "meta").attr("x", 8).attr("y", 30);
+  ne.append("text").attr("class", "chip").attr("x", BOXW - 8).attr("y", 14).attr("text-anchor", "end");
+  ne.append("title");
+  const nm = ne.merge(nd)
+    .attr("class", d => "layer" + (d.kind === "container" ? " container" : "") + (d.live ? "" : " dead"));
+  nm.transition(T).attr("transform", d => `translate(${x(d)},${y(d)})`).attr("opacity", 1);
+  nm.select("rect.body").attr("stroke", stroke);
+  nm.select("rect.sizebar").attr("width", d => Math.max(0, Math.min(BOXW - 2, (BOXW - 2) * Math.log10(1 + d.size / KB) / 5.2)));
+  nm.select("text.instr").text(d => d.instr.length > 26 ? d.instr.slice(0, 25) + "…" : d.instr);
+  nm.select("text.meta").text(d => d.kind === "container"
+    ? `writable · ${Object.keys(d.rw).length} changed file(s)`
+    : `${short(d.id)} · ${fmt(d.size)}${d.live ? "" : " · dangling"}`);
+  nm.select("text.chip").text(d => status(d) || "").attr("fill", d => status(d) === "NEW" ? "var(--new)" : "var(--cached)");
+  nm.select("title").text(d => d.kind === "container"
+    ? `container ${d.instr.slice(10)}\nchanged: ${Object.keys(d.rw).join(", ") || "nothing yet"}`
+    : `${d.id}\n${d.instr}\n${fmt(d.size)}${d.files ? "\ncopied: " + d.files.map(f => f[0]).join(", ") : ""}`);
+
+  /* image tags: pills above the layer they name */
+  const pills = [];
+  Object.keys(s.images).sort().forEach(t => {
+    const n = byId.get(s.images[t]); if (!n) return;
+    pills.push({ key: t, text: t, node: n, k: pills.filter(p => p.node === n).length });
+  });
+  const pw = t => t.length * 6 + 12;
+  const pg = svg.selectAll("g.pill").data(pills, d => d.key);
+  pg.exit().remove();
+  const pe = pg.enter().append("g").attr("class", "pill")
+    .attr("transform", d => `translate(${x(d.node) + 6 + d.k * 4},${y(d.node) - 16 - d.k * 15})`);
+  pe.append("rect").attr("height", 13).attr("y", -6.5);
+  pe.append("text").attr("y", 3.5).attr("x", 6);
+  const pm = pe.merge(pg);
+  pm.transition(T).attr("transform", d => `translate(${x(d.node) + 6 + d.k * 4},${y(d.node) - 16 - d.k * 15})`);
+  pm.select("rect").attr("width", d => pw(d.text));
+  pm.select("text").text(d => d.text);
+
+  /* flash new layers; keep the newest row in view */
+  if (prevIds) {
+    nm.filter(d => !prevIds.has(d.id)).classed("flash", true)
+      .transition().delay(700).on("end", function () { d3.select(this).classed("flash", false); });
+    const sc = document.getElementById("scroller");
+    const fresh = nodes.filter(d => !prevIds.has(d.id));
+    if (fresh.length) sc.scrollTo({ top: Math.max(0, y(fresh[fresh.length - 1]) - 60), left: Math.max(0, x(fresh[fresh.length - 1]) - 40), behavior: "smooth" });
+  }
+  prevIds = new Set(nodes.map(n => n.id));
+
+  renderSide(s);
+}
+
+function renderSide(s) {
+  const lb = s.lastBuild;
+  const stale = lb && JSON.stringify(lb.steps.map(t => t.i)) !== JSON.stringify(s.dockerfile.map((_, i) => i));
+  const rows = s.dockerfile.map((text, i) => {
+    const st = lb && !stale ? lb.steps.find(t => t.i === i) : null;
+    return { i, text, st: st ? (st.from ? "base" : st.cached ? "cached" : "new") : "",
+             id: st ? short(st.id) : "", miss: lb && !stale && lb.firstMiss === i };
+  });
+  const tr = d3.select("#dockerfile").selectAll("tr").data(rows, d => d.i);
+  tr.exit().remove();
+  const te = tr.enter().append("tr");
+  te.append("td").attr("class", "n"); te.append("td").attr("class", "txt"); te.append("td").attr("class", "st");
+  const tm = te.merge(tr).order().attr("class", d => d.miss ? "miss" : null);
+  tm.select("td.n").text(d => d.i + 1);
+  tm.select("td.txt").text(d => d.text).each(function (d) {
+    if (prevDf && prevDf[d.i] !== d.text) { this.classList.add("flash"); setTimeout(() => this.classList.remove("flash"), 700); }
+  });
+  tm.select("td.st").attr("class", d => "st " + d.st).text(d => d.st === "new" ? "NEW " + d.id : d.st === "cached" ? "CACHED " + d.id : d.st === "base" ? d.id : "");
+  prevDf = [...s.dockerfile];
+
+  const files = Object.keys(s.context).sort().map(f => ({ f, ...s.context[f] }));
+  const cr = d3.select("#context").selectAll("tr").data(files, d => d.f);
+  cr.exit().remove();
+  const ce = cr.enter().append("tr");
+  ce.append("td").attr("class", "txt"); ce.append("td").attr("class", "h"); ce.append("td").attr("class", "sz");
+  const cm = ce.merge(cr).order();
+  cm.select("td.txt").text(d => d.f);
+  cm.select("td.h").text(d => d.hash).each(function (d) {
+    if (prevCtx && prevCtx.get(d.f) !== d.hash) { this.classList.add("flash"); setTimeout(() => this.classList.remove("flash"), 700); }
+  });
+  cm.select("td.sz").text(d => fmt(d.size));
+  prevCtx = new Map(files.map(d => [d.f, d.hash]));
+}
+
+/* ============================================================================
+   5. LESSON — data. `needs` gates each step; when it fails the sandbox
+   restarts and replays every earlier step's command.
+   ========================================================================= */
+const BAD  = ["FROM node:20-slim", "WORKDIR /app", "COPY . .", "RUN npm install", 'CMD ["node","src/app.js"]'];
+const MID  = ["FROM node:20-slim", "WORKDIR /app", "COPY package.json .", "COPY . .", "RUN npm install", 'CMD ["node","src/app.js"]'];
+const GOOD = ["FROM node:20-slim", "WORKDIR /app", "COPY package.json .", "RUN npm install", "COPY . .", 'CMD ["node","src/app.js"]'];
+const dfIs = (s, df) => JSON.stringify(s.dockerfile) === JSON.stringify(df);
+const missAt = s => { const p = plan(s); return p.error ? -2 : (p.firstMiss ?? -1); };
+const hasApp = s => "app:latest" in s.images;
+
+const LESSON = [
+  { title: "Build it once",
+    body: `Docker walks the Dockerfile top to bottom. Each instruction runs on top of the layer
+    before it and produces a new layer whose id is a <strong>hash of the parent id, the
+    instruction, and any files it copied</strong>. The base image is already local, so its
+    two layers are reused; the four instructions after it are built.`,
+    try: "docker build -t app .", expect: /^docker build/,
+    needs: s => !hasApp(s) && dfIs(s, BAD) },
+
+  { title: "Build it again",
+    body: `Same Dockerfile, same files, so every hash comes out the same as last time and
+    every layer already exists. Nothing is built, nothing new appears in the store, and
+    the image id is identical. A cache hit is just "a layer with this id exists".`,
+    try: "docker build -t app .", expect: /^docker build/, readonly: true,
+    needs: s => hasApp(s) && dfIs(s, BAD) && missAt(s) === -1 },
+
+  { title: "Change a source file",
+    body: `Edit one file in the build context. The store doesn't move — docker doesn't
+    watch your files, it only looks at them during a build. But the file's content hash
+    changed, and that hash feeds into <code>COPY . .</code>'s layer id.`,
+    try: "edit src/app.js", expect: /^(edit|touch)\s/,
+    needs: s => hasApp(s) && dfIs(s, BAD) && missAt(s) === -1 },
+
+  { title: "Rebuild: the cache breaks at COPY",
+    body: `Line 3 misses because its inputs changed. Then line 4 misses too, even though
+    <code>npm install</code> has nothing to do with <code>app.js</code>: its parent id is
+    different, so its own hash is different. <strong>One miss invalidates everything after
+    it.</strong> That's a 40MB install re-run for a one-line edit. The old layers stay in
+    the store as a dead column.`,
+    try: "docker build -t app .", expect: /^docker build/,
+    needs: s => hasApp(s) && dfIs(s, BAD) && missAt(s) === 2 },
+
+  { title: "Read the history",
+    body: `The image is nothing but the chain of layers from its tag down to the root.
+    Sizes are per layer; the image's size is the sum. The two base layers are shared with
+    every other image built <code>FROM node:20-slim</code>.`,
+    try: "docker history app", expect: /^docker history/, readonly: true,
+    needs: s => hasApp(s) },
+
+  { title: "Fix the order, part one",
+    body: `The dependency install only needs <code>package.json</code>. Copy that file by
+    itself, before the install, so the install's inputs stop changing when source files
+    change. This inserts a new line 3 and pushes the rest down.`,
+    try: "insert 3 COPY package.json .", expect: /^insert 3 COPY package\.json/,
+    needs: s => dfIs(s, BAD) },
+
+  { title: "Fix the order, part two",
+    body: `Now the full copy is still above the install. Swap them so the order is: copy the
+    manifest, install, <em>then</em> copy everything else. The Dockerfile panel shows the
+    change; nothing has been built yet.`,
+    try: "swap 4 5", expect: /^swap 4 5|^swap 5 4/,
+    needs: s => dfIs(s, MID) },
+
+  { title: "Rebuild with the new order",
+    body: `Line 3 is a new instruction, so everything from there is built: a one-time cost.
+    The store forks again at <code>WORKDIR</code>, and <code>app</code> now points at a
+    third column. Watch what happens on the next edit.`,
+    try: "docker build -t app .", expect: /^docker build/,
+    needs: s => dfIs(s, GOOD) && missAt(s) === 2 },
+
+  { title: "Edit source again",
+    body: `Same edit as before. This time <code>package.json</code> is untouched, so line 3's
+    inputs are unchanged, so its parent-plus-instruction chain through line 4 is unchanged.`,
+    try: "edit src/app.js", expect: /^(edit|touch)\s/,
+    needs: s => dfIs(s, GOOD) && missAt(s) === -1 },
+
+  { title: "Rebuild: the install survives",
+    body: `The cache breaks at line 5 now, below the install. Two tiny layers are rebuilt
+    and the 40MB one is reused. <strong>Put the things that change least at the top.</strong>
+    That is the whole art of Dockerfile ordering.`,
+    try: "docker build -t app .", expect: /^docker build/,
+    needs: s => dfIs(s, GOOD) && missAt(s) === 4 },
+
+  { title: "Change a dependency",
+    body: `Edit <code>package.json</code>. This <em>should</em> re-run the install, and it
+    will: line 3's content hash changes, so line 4's parent changes. The cache is doing
+    exactly what a cache should — the ordering only fixed the false invalidations.`,
+    try: "edit package.json", expect: /^(edit|touch)\s+package\.json/,
+    needs: s => dfIs(s, GOOD) && missAt(s) === -1 },
+
+  { title: "Rebuild: a legitimate miss",
+    body: `Breaks at line 3, rebuilds the install and everything above it. Correct and
+    unavoidable. Notice how many dead columns the store has now — each is a build that no
+    tag names any more.`,
+    try: "docker build -t app .", expect: /^docker build/,
+    needs: s => dfIs(s, GOOD) && missAt(s) === 2 },
+
+  { title: "A container is one more layer",
+    body: `Running an image adds a single thin <strong>writable</strong> layer on top of it.
+    Every image layer below stays read-only and is shared with every other container from
+    the same image. That is why starting a container is instant and costs almost nothing.`,
+    try: "docker run --name web app", expect: /^docker run/,
+    needs: s => hasApp(s) && !("web" in s.containers) },
+
+  { title: "Copy-on-write",
+    body: `Change a file inside the container. The file lives in an image layer, so it is
+    copied <em>up</em> into the writable layer and the copy is modified. The image layer
+    never changes; a second container from the same image still sees the original.`,
+    try: "docker exec web edit src/app.js", expect: /^docker exec web (edit|touch)/,
+    needs: s => "web" in s.containers && !Object.keys(s.containers.web.rw).length },
+
+  { title: "Commit freezes the writable layer",
+    body: `<code>docker commit</code> turns the container's writable layer into a read-only
+    image layer and tags it. It's the same shape as a build step, minus the reproducibility
+    — nobody can tell from the Dockerfile what's in it. Useful for debugging, a smell in
+    production.`,
+    try: "docker commit web app:patched", expect: /^docker commit web/,
+    needs: s => "web" in s.containers && Object.keys(s.containers.web.rw).length > 0 && !("app:patched" in s.images) },
+
+  { title: "Collect the garbage",
+    body: `Every faded layer is one that no tag and no container reaches. Prune deletes them
+    and reports the space. This is the same rule as unreachable commits in git: a name is
+    what keeps an object alive.`,
+    try: "docker image prune", expect: /^docker image prune/,
+    needs: s => s.order.some(id => !reachable(s).has(id)) },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try building a second image from the same base
+    with a different tag and watch how much of the store they share, or <code>docker rmi
+    app</code> and see which layers go dangling.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   6. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Layer sandbox loaded. Type 'help' for the command list.", "dim");
+</script>
+</body>
+</html>

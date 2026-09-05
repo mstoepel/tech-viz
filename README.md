@@ -10,8 +10,9 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 |---|-------|------|-----------------|
 | 01 | Git | [git/three-trees.html](git/three-trees.html) | Working directory, index, HEAD, and why `add` / `restore` / `reset` are all the same move |
 | 02 | Git | [git/branching.html](git/branching.html) | Branches as pointers, fast-forward vs merge commit, rebase, detached HEAD |
+| 01 | Docker | [docker/layers.html](docker/layers.html) | Content-addressed layers, cache invalidation, Dockerfile ordering, copy-on-write, prune |
 
-Planned: Docker image layers, Kubernetes reconciliation, diffusion models.
+Planned: Kubernetes reconciliation, diffusion models.
 
 ## Conventions
 
