@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tech-viz — technical concepts, visualised</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --unstaged:#e8a33d; --staged:#6fbf73; --ref:#b08be8;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--unstaged)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 30px;font-size:15px}
+h2{font-family:var(--mono);font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--ink-faint);margin:28px 0 10px;font-weight:400}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+a.card{display:block;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 16px;text-decoration:none;color:inherit;transition:border-color .2s}
+a.card:hover{border-color:var(--ref)}
+a.card .no{font-family:var(--mono);font-size:11px;color:var(--ref);letter-spacing:.1em}
+a.card .t{font-family:var(--mono);font-weight:700;font-size:15px;margin:4px 0 6px}
+a.card .d{font-size:13.5px;color:var(--ink-dim);margin:0}
+.soon{opacity:.45;border-style:dashed;pointer-events:none}
+.soon .no{color:var(--ink-faint)}
+footer{margin-top:40px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer a{color:var(--ink-dim)}
+:focus-visible{outline:2px solid var(--ref);outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">tech-viz</p>
+  <h1>Technical concepts that are <em>easier to see</em> than to read</h1>
+  <p class="standfirst">Interactive sandboxes for ideas that resist prose. Each one is a
+  single page: type real commands, watch the model move.</p>
+
+  <h2>Git internals</h2>
+  <div class="cards">
+    <a class="card" href="git/three-trees.html">
+      <div class="no">SANDBOX 01</div>
+      <div class="t">The Three Trees</div>
+      <p class="d">Working directory, index, HEAD. Why <code>add</code>, <code>restore</code>
+      and the three flavours of <code>reset</code> are all the same move.</p>
+    </a>
+    <a class="card" href="git/branching.html">
+      <div class="no">SANDBOX 02</div>
+      <div class="t">Branches are pointers</div>
+      <p class="d">A branch is a file holding one commit id. Fast-forward, merge commits,
+      rebase and detached HEAD, watched at the level of which files get rewritten.</p>
+    </a>
+  </div>
+
+  <h2>On the list</h2>
+  <div class="cards">
+    <a class="card soon"><div class="no">CONTAINERS</div><div class="t">Docker image layers</div>
+      <p class="d">Copy-on-write, layer caching, and why ordering your Dockerfile matters.</p></a>
+    <a class="card soon"><div class="no">ORCHESTRATION</div><div class="t">Kubernetes reconciliation</div>
+      <p class="d">Desired state, observed state, and the controllers that close the gap.</p></a>
+    <a class="card soon"><div class="no">ML</div><div class="t">Diffusion models</div>
+      <p class="d">Adding noise forward, learning to remove it backward.</p></a>
+  </div>
+
+  <footer>Source on <a href="https://github.com/mstoepel/tech-viz">GitHub</a>.
+  Built with D3; no build step, every page is self-contained.</footer>
+</div>
+</body>
+</html>

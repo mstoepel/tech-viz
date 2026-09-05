@@ -1,2 +1,40 @@
 # tech-viz
-D3 Visualizations of technical concepts
+
+Interactive D3 visualisations of technical concepts that are easier to see than to read.
+
+**Live:** https://mstoepel.github.io/tech-viz/
+
+## Visualisations
+
+| # | Topic | Page | What it teaches |
+|---|-------|------|-----------------|
+| 01 | Git | [git/three-trees.html](git/three-trees.html) | Working directory, index, HEAD, and why `add` / `restore` / `reset` are all the same move |
+| 02 | Git | [git/branching.html](git/branching.html) | Branches as pointers, fast-forward vs merge commit, rebase, detached HEAD |
+
+Planned: Docker image layers, Kubernetes reconciliation, diffusion models.
+
+## Conventions
+
+- **One folder per topic, one self-contained HTML file per concept.** No build step,
+  no bundler. D3 and fonts load from CDN; everything else is inline. Open the file in a
+  browser and it works.
+- **Sandbox, not slideshow.** Each page has a terminal where the learner types real
+  commands. A guided lesson sits on top, but the whole command registry is always open.
+- **Engine shape.** Every sandbox is four separable parts: an immutable `state`, a registry
+  of pure `(state, args) -> {state, out}` reducers, a parser, and a D3 renderer that only ever
+  diffs state against the DOM. A lesson is data (`LESSON` array), not code.
+- **Semantic colour.** Pick two or three colours that mean something in the model (in the
+  git sandbox: amber = unstaged, green = staged, purple = refs) and keep everything else quiet.
+
+## Running locally
+
+Open any HTML file directly, or serve the root so the index links work:
+
+```bash
+python -m http.server 8000
+```
+
+## Deploying
+
+GitHub Pages, deployed from the `main` branch root. No workflow needed because there is
+nothing to build.

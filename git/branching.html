@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Branches are pointers — a git sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Here the semantic colours are per-branch: every lane gets one and keeps it,
+   so "which branch does this commit belong to" is answered by colour alone.
+   HEAD is the one moving part, so it gets its own colour.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --head:#e8a33d; --ref:#b08be8; --danger:#e06c6c; --dead:#3f4c59;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--head)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--ref);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code,.refs code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--ref);color:var(--ref)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--ref);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the commit graph on the left, and on the right the literal
+   files under .git that the graph is drawn from. Every command changes one
+   or two lines in that file listing — that's the lesson.
+   ========================================================================= */
+.stage{display:grid;grid-template-columns:1fr 250px;gap:14px;align-items:stretch}
+.graphbox{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2)}
+.scroller{overflow-x:auto;overflow-y:hidden;flex:1}
+#graph{display:block}
+#graph text{font-family:var(--code)}
+#graph .id{font-size:10px;fill:var(--ink-faint)}
+#graph .msg{font-size:10px;fill:var(--ink-dim)}
+#graph .pill text{font-size:10.5px;font-weight:700}
+#graph .pill rect{rx:3;ry:3}
+#graph .node circle.core{fill:var(--panel-2);stroke-width:1.6}
+#graph .node.merge circle.ring{fill:none;stroke-width:1;opacity:.6}
+#graph .node.flash circle.core{fill:rgba(176,139,232,.35)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;padding:6px 12px 10px;
+  font-family:var(--code);font-size:11px;color:var(--ink-faint);border-top:1px solid var(--line)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;
+  vertical-align:-1px;border:1.5px solid currentColor}
+
+.refs{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column}
+.refs table{border-collapse:collapse;width:100%;font-family:var(--code);font-size:11.5px}
+.refs td{padding:7px 12px;border-bottom:1px solid rgba(46,58,71,.55);vertical-align:top}
+.refs tr:last-child td{border-bottom:none}
+.refs td.path{color:var(--ink-faint);white-space:nowrap}
+.refs td.val{color:var(--ink);transition:background .5s,color .5s}
+.refs td.val.flash{background:rgba(176,139,232,.16)}
+.refs td.head{color:var(--head)}
+.refs .note{padding:10px 12px;font-size:11.5px;color:var(--ink-faint);margin-top:auto;
+  border-top:1px solid var(--line);font-family:var(--sans)}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:200px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--ref)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:#6fbf73} .log .mod{color:var(--head)} .log .err{color:var(--danger)}
+.log .hd{color:var(--head)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--ref)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:760px){
+  .stage{grid-template-columns:1fr}
+  .refs .note{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 02 · Git internals</p>
+  <h1>A branch is just a <em>pointer</em></h1>
+  <p class="standfirst">Not a folder, not a copy, not a timeline. A branch is a 41-byte file
+  holding one commit id, and <code>HEAD</code> is a file holding a branch name. Merge and
+  rebase look complicated until you watch which files they write.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="graphbox">
+      <div class="cap">Commit graph · older ← → newer</div>
+      <div class="scroller" id="scroller"><svg id="graph" role="img" aria-label="commit graph"></svg></div>
+      <div class="legend">
+        <span><i style="color:var(--head)"></i>HEAD</span>
+        <span><i style="color:var(--ref)"></i>reachable commit</span>
+        <span><i style="color:var(--dead)"></i>unreachable (no ref points here)</span>
+        <span>◎ merge commit</span>
+      </div>
+    </div>
+    <div class="refs">
+      <div class="cap">.git/ — the files behind the graph</div>
+      <table><tbody id="refs"></tbody></table>
+      <div class="note">Every command on this page does nothing but append commit
+      objects and rewrite these files.</div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="git command" placeholder="git branch">
+    </div>
+  </div>
+  <p class="hintbar">Try <code>help</code> · <code>git switch -c topic</code> ·
+  <code>git commit -m "x"</code> · <code>git merge topic</code> · <code>git rebase main</code> ·
+  <code>git log --all</code> · ↑ for history</p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as
+    <a href="three-trees.html">The Three Trees</a>: immutable <code>state</code>, pure
+    reducers, a parser, a D3 renderer that diffs state against the DOM, and a
+    <code>LESSON</code> array. Here the state is a commit DAG plus a map of ref
+    files; there are no file contents and therefore no merge conflicts. Conflicts
+    are about content; this page is about shape.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   commits: id → {id, msg, parents[], lane}. `lane` is the row the commit is
+   drawn on: the branch that was checked out when it was created. Storing it
+   at creation (rather than recomputing) is what keeps the graph stable while
+   branches move around it.
+   branches: name → commit id.   head: {branch} or {detached: id}.
+   ========================================================================= */
+const hex = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
+const newId = () => hex() + hex().slice(0, 2);
+
+function initialState() {
+  const c = {
+    e3a1f7:   { id: "e3a1f7", msg: "Add project skeleton",  parents: [],         lane: 0 },
+    "9d4c02": { id: "9d4c02", msg: "Add app entry point",   parents: ["e3a1f7"], lane: 0 },
+    "5ab8e1": { id: "5ab8e1", msg: "Document setup steps",  parents: ["9d4c02"], lane: 0 }
+  };
+  return {
+    commits: c,
+    order: ["e3a1f7", "9d4c02", "5ab8e1"],
+    branches: { main: "5ab8e1" },
+    laneOf: { main: 0 },
+    nextLane: 1,
+    head: { branch: "main" }
+  };
+}
+
+const clone   = s => structuredClone(s);
+const headId  = s => s.head.branch ? s.branches[s.head.branch] : s.head.detached;
+const curLane = s => s.head.branch ? s.laneOf[s.head.branch] : s.commits[headId(s)].lane;
+const isMerge = c => c.parents.length > 1;
+
+/* Set of ids reachable from `id`, inclusive. */
+function ancestors(s, id) {
+  const seen = new Set(), stack = [id];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || seen.has(cur)) continue;
+    seen.add(cur);
+    stack.push(...s.commits[cur].parents);
+  }
+  return seen;
+}
+const isAncestor = (s, a, b) => ancestors(s, b).has(a);   /* a reachable from b */
+
+function mergeBase(s, a, b) {
+  const A = ancestors(s, a);
+  let best = null;
+  for (const id of ancestors(s, b))
+    if (A.has(id) && (best === null || s.order.indexOf(id) > s.order.indexOf(best))) best = id;
+  return best;
+}
+
+/* Everything some ref (or a detached HEAD) can still reach. */
+function reachable(s) {
+  const tips = Object.values(s.branches);
+  if (!s.head.branch) tips.push(s.head.detached);
+  const out = new Set();
+  tips.forEach(t => ancestors(s, t).forEach(id => out.add(id)));
+  return out;
+}
+
+/* HEAD, main, main~2, HEAD^^, or an id prefix. */
+function resolve(s, ref) {
+  if (!ref) return headId(s);
+  const m = /^(.*?)(?:~(\d+)|(\^+))?$/.exec(ref);
+  const base = m[1] || "HEAD";
+  let back = m[2] ? +m[2] : (m[3] ? m[3].length : 0);
+  let id = base === "HEAD" ? headId(s)
+         : s.branches[base] ?? s.order.find(i => i.startsWith(base)) ?? null;
+  if (!id) return null;
+  while (back-- > 0) {
+    const p = s.commits[id].parents[0];
+    if (!p) return null;
+    id = p;
+  }
+  return id;
+}
+
+/* ============================================================================
+   2. COMMANDS — pure reducers, {state?, out:[{text,cls}], error?}
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const short = id => id.slice(0, 7);
+
+function addCommit(n, msg, parents, lane) {
+  const id = newId();
+  n.commits[id] = { id, msg, parents, lane };
+  n.order.push(id);
+  return id;
+}
+/* Move whatever HEAD names: the branch, or HEAD itself when detached. */
+function advance(n, id) {
+  if (n.head.branch) n.branches[n.head.branch] = id; else n.head.detached = id;
+}
+function whereAmI(s) {
+  return s.head.branch ? s.head.branch : `detached HEAD at ${short(headId(s))}`;
+}
+function positional(args) { return args.filter(a => !a.startsWith("-")); }
+
+function createBranch(n, name, startRef) {
+  if (n.branches[name]) return fail(`fatal: a branch named '${name}' already exists`);
+  if (!/^[\w.\/-]+$/.test(name)) return fail(`fatal: '${name}' is not a valid branch name`);
+  const id = resolve(n, startRef);
+  if (!id) return fail(`fatal: not a valid object name: '${startRef}'`);
+  n.branches[name] = id;
+  n.laneOf[name] = n.nextLane++;
+  return { out: [line(`wrote .git/refs/heads/${name}  →  ${short(id)}`, "add")] };
+}
+function switchTo(n, name) {
+  if (!n.branches[name]) return null;
+  n.head = { branch: name };
+  return line(`wrote .git/HEAD  →  ref: refs/heads/${name}`, "hd");
+}
+
+const REGISTRY = {
+
+  "git branch": (s, args) => {
+    const del = args.find(a => a === "-d" || a === "-D");
+    const pos = positional(args);
+    if (del) {
+      const name = pos[0];
+      if (!name) return fail("fatal: branch name required");
+      if (!s.branches[name]) return fail(`error: branch '${name}' not found.`);
+      if (s.head.branch === name) return fail(`error: cannot delete branch '${name}' checked out at HEAD`);
+      const merged = isAncestor(s, s.branches[name], headId(s));
+      if (!merged && del === "-d")
+        return fail(`error: the branch '${name}' is not fully merged. Use -D to force.`);
+      const n = clone(s);
+      delete n.branches[name];
+      return { state: n, out: [
+        line(`Deleted branch ${name} (was ${short(s.branches[name])}).`, "mod"),
+        line(merged ? "one file removed — every commit it pointed at is still reachable from HEAD"
+                    : "one file removed — its commits are now unreachable (faded)", "dim")
+      ] };
+    }
+    if (!pos.length) {
+      const out = Object.keys(s.branches).sort().map(b =>
+        line(`${s.head.branch === b ? "* " : "  "}${b.padEnd(12)} ${short(s.branches[b])}`,
+             s.head.branch === b ? "hd" : "ok"));
+      if (!s.head.branch) out.unshift(line(`* (HEAD detached at ${short(headId(s))})`, "hd"));
+      return { out };
+    }
+    const n = clone(s);
+    const r = createBranch(n, pos[0], pos[1]);
+    if (r.error) return r;
+    return { state: n, out: [...r.out, line("nothing else changed — a branch is a name for a commit", "dim")] };
+  },
+
+  "git switch": (s, args) => {
+    const n = clone(s), pos = positional(args);
+    if (args.includes("-c")) {
+      const r = createBranch(n, pos[0], pos[1]);
+      if (r.error) return r;
+      return { state: n, out: [...r.out, switchTo(n, pos[0])] };
+    }
+    if (args.includes("--detach")) {
+      const id = resolve(n, pos[0]);
+      if (!id) return fail(`fatal: invalid reference: ${pos[0]}`);
+      n.head = { detached: id };
+      return { state: n, out: [
+        line(`wrote .git/HEAD  →  ${id}`, "hd"),
+        line(`HEAD is now at ${short(id)} ${n.commits[id].msg}`, "dim"),
+        line("HEAD holds a raw commit id — no branch will move when you commit", "dim")
+      ] };
+    }
+    if (!pos[0]) return fail("fatal: missing branch name; try 'git switch <branch>'");
+    if (s.head.branch === pos[0]) return { out: [line(`Already on '${pos[0]}'`, "dim")] };
+    const l = switchTo(n, pos[0]);
+    if (!l) return resolve(s, pos[0])
+      ? fail(`fatal: a branch is expected, got commit '${pos[0]}' (use --detach)`)
+      : fail(`fatal: invalid reference: ${pos[0]}`);
+    return { state: n, out: [l, line(`Switched to branch '${pos[0]}'`, "dim")] };
+  },
+
+  "git checkout": (s, args) => {
+    const pos = positional(args);
+    if (args.includes("-b")) return REGISTRY["git switch"](s, ["-c", ...pos]);
+    if (!pos[0]) return fail("fatal: missing branch or commit");
+    if (s.branches[pos[0]]) return REGISTRY["git switch"](s, pos);
+    const r = REGISTRY["git switch"](s, ["--detach", pos[0]]);
+    if (!r.error) r.out.unshift(line("checkout of a non-branch detaches HEAD", "dim"));
+    return r;
+  },
+
+  "git commit": (s, args, raw) => {
+    const m = /-m\s+("([^"]*)"|'([^']*)'|(\S+))/.exec(raw);
+    const msg = (m && (m[2] ?? m[3] ?? m[4])) || "Update";
+    const n = clone(s);
+    const id = addCommit(n, msg, [headId(n)], curLane(n));
+    advance(n, id);
+    return { state: n, out: [
+      line(`[${whereAmI(n)} ${short(id)}] ${msg}`, "add"),
+      line(n.head.branch
+        ? `new object with parent ${short(s.commits[headId(s)].id)}; wrote refs/heads/${n.head.branch}  →  ${short(id)}`
+        : `new object; wrote .git/HEAD  →  ${short(id)} (no branch moved)`, "dim")
+    ] };
+  },
+
+  "git merge": (s, args) => {
+    const noff = args.includes("--no-ff"), ffOnly = args.includes("--ff-only");
+    const ref = positional(args)[0];
+    if (!ref) return fail("fatal: No commit specified and merge.defaultToUpstream not set.");
+    const target = resolve(s, ref);
+    if (!target) return fail(`merge: ${ref} - not something we can merge`);
+    const cur = headId(s);
+    if (isAncestor(s, target, cur)) return { out: [line("Already up to date.", "dim")] };
+    const n = clone(s);
+    if (isAncestor(s, cur, target) && !noff) {
+      advance(n, target);
+      return { state: n, out: [
+        line(`Updating ${short(cur)}..${short(target)}`, "ok"),
+        line("Fast-forward", "add"),
+        line(`${whereAmI(n)} was an ancestor of ${ref}, so its file was simply overwritten. No new commit.`, "dim")
+      ] };
+    }
+    if (ffOnly) return fail("fatal: Not possible to fast-forward, aborting.");
+    const base = mergeBase(s, cur, target);
+    const id = addCommit(n, `Merge branch '${ref}'`, [cur, target], curLane(n));
+    advance(n, id);
+    return { state: n, out: [
+      line(`merge base is ${short(base)} — the newest commit both sides can reach`, "dim"),
+      line(`Merge made by the 'ort' strategy.`, "ok"),
+      line(`[${whereAmI(n)} ${short(id)}] Merge branch '${ref}'  (parents ${short(cur)}, ${short(target)})`, "add")
+    ] };
+  },
+
+  "git rebase": (s, args) => {
+    const ref = positional(args)[0];
+    if (!ref) return fail("fatal: rebase needs an upstream, e.g. git rebase main");
+    const onto = resolve(s, ref);
+    if (!onto) return fail(`fatal: invalid upstream '${ref}'`);
+    const cur = headId(s);
+    if (isAncestor(s, onto, cur)) return { out: [line(`Current branch ${whereAmI(s)} is up to date.`, "dim")] };
+    const n = clone(s);
+    if (isAncestor(s, cur, onto)) {
+      advance(n, onto);
+      return { state: n, out: [line(`Fast-forwarded ${whereAmI(n)} to ${ref}.`, "add")] };
+    }
+    const skip = ancestors(s, onto);
+    const replay = s.order.filter(id => ancestors(s, cur).has(id) && !skip.has(id) && !isMerge(s.commits[id]));
+    const out = [line(`merge base ${short(mergeBase(s, cur, onto))}; replaying ${replay.length} commit(s) onto ${short(onto)}`, "dim")];
+    let parent = onto;
+    replay.forEach((old, i) => {
+      const id = addCommit(n, s.commits[old].msg, [parent], curLane(n));
+      out.push(line(`Rebasing (${i + 1}/${replay.length}): ${s.commits[old].msg}   ${short(old)} → ${short(id)}`, "mod"));
+      parent = id;
+    });
+    advance(n, parent);
+    out.push(line(`Successfully rebased and updated refs/heads/${n.head.branch ?? "HEAD"}.`, "add"));
+    out.push(line("the old commits were not moved — they were copied, and abandoned", "dim"));
+    return { state: n, out };
+  },
+
+  "git cherry-pick": (s, args) => {
+    const ref = positional(args)[0];
+    const src = resolve(s, ref);
+    if (!src) return fail(`fatal: bad revision '${ref}'`);
+    const n = clone(s);
+    const id = addCommit(n, s.commits[src].msg, [headId(n)], curLane(n));
+    advance(n, id);
+    return { state: n, out: [
+      line(`[${whereAmI(n)} ${short(id)}] ${s.commits[src].msg}`, "add"),
+      line(`a copy of ${short(src)} with a new parent — and therefore a new id`, "dim")
+    ] };
+  },
+
+  "git reset": (s, args) => {
+    const ref = positional(args)[0];
+    const id = resolve(s, ref);
+    if (!id) return fail(`fatal: ambiguous argument '${ref}': unknown revision`);
+    const n = clone(s);
+    advance(n, id);
+    return { state: n, out: [
+      line(`${whereAmI(n)}  →  ${short(id)}`, "mod"),
+      line("only the pointer moved; whatever it used to point at is still in the object store", "dim")
+    ] };
+  },
+
+  "git log": (s, args) => {
+    const all = args.includes("--all");
+    const tips = all ? [...Object.values(s.branches), headId(s)] : [headId(s)];
+    const seen = new Set();
+    tips.forEach(t => ancestors(s, t).forEach(id => seen.add(id)));
+    const out = [];
+    [...s.order].reverse().filter(id => seen.has(id)).forEach(id => {
+      const c = s.commits[id];
+      const decos = [];
+      if (!s.head.branch && s.head.detached === id) decos.push("HEAD");
+      Object.entries(s.branches).filter(([, v]) => v === id)
+        .forEach(([b]) => decos.push(s.head.branch === b ? `HEAD -> ${b}` : b));
+      const d = decos.length ? ` (${decos.join(", ")})` : "";
+      out.push(line(`${isMerge(c) ? "◎" : "●"} ${short(id)}${d} ${c.msg}`, decos.length ? "hd" : "ok"));
+    });
+    return { out };
+  },
+
+  "git status": s => ({ out: [line(s.head.branch ? `On branch ${s.head.branch}`
+                                                 : `HEAD detached at ${short(headId(s))}`, "ok")] }),
+
+  "help": () => ({ out: [
+    line("git branch                   list branches (each is one file)", "ok"),
+    line("git branch <name> [start]    create a pointer; nothing else changes", "ok"),
+    line("git branch -d|-D <name>      delete the pointer; commits stay", "ok"),
+    line("git switch <name>            rewrite .git/HEAD", "ok"),
+    line("git switch -c <name>         create + switch   (also: git checkout -b)", "ok"),
+    line("git switch --detach <ref>    HEAD holds a commit id directly", "ok"),
+    line("git commit -m \"msg\"          new commit; moves whatever HEAD names", "ok"),
+    line("git merge [--no-ff] <ref>    fast-forward, or a two-parent commit", "ok"),
+    line("git rebase <ref>             replay this branch's commits onto <ref>", "ok"),
+    line("git cherry-pick <ref>        copy one commit onto HEAD", "ok"),
+    line("git reset --hard <ref>       move the current pointer", "ok"),
+    line("git log [--all] · git status · restart", "ok"),
+    line("refs: HEAD, main, main~2, HEAD^, or an id prefix", "dim")
+  ] }),
+
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+
+/* ============================================================================
+   3. PARSER — quote-aware tokeniser, longest-prefix lookup.
+   ========================================================================= */
+function tokenize(str) { return (str.match(/"[^"]*"|'[^']*'|\S+/g) || []); }
+function dispatch(state, raw) {
+  const tok = tokenize(raw.trim());
+  if (!tok.length) return null;
+  for (const n of [2, 1]) {
+    const key = tok.slice(0, n).join(" ");
+    if (REGISTRY[key]) return REGISTRY[key](state, tok.slice(n).map(t => t.replace(/^["']|["']$/g, "")), raw);
+  }
+  return fail(`${tok[0]}: command not found — try 'help'`);
+}
+
+/* ============================================================================
+   4. RENDERER
+   Layout is deliberately dumb: x = creation order, y = lane. Creation order
+   is always a valid topological order (parents exist before children), and
+   it makes rebase look like what it is — new commits appearing at the right.
+   ========================================================================= */
+const LANE_COLOURS = ["var(--ref)", "#6fbf73", "#5cc8d6", "#e07aa8", "#c9b458", "#7fa0e8"];
+const laneColour = l => LANE_COLOURS[l % LANE_COLOURS.length];
+const GAP = 84, ROW = 78, TOP = 62, LEFT = 44;
+let prevIds = null, prevRefs = null;
+
+function render(s) {
+  const live = reachable(s);
+  const nodes = s.order.map((id, i) => ({ ...s.commits[id], i, live: live.has(id) }));
+  const lanes = [...new Set(nodes.map(n => n.lane))].sort((a, b) => a - b);
+  const rowOf = new Map(lanes.map((l, r) => [l, r]));
+  const x = d => LEFT + d.i * GAP;
+  const y = d => TOP + rowOf.get(d.lane) * ROW;
+  const w = Math.max(360, LEFT + nodes.length * GAP + 10);
+  const h = TOP + (lanes.length - 1) * ROW + 48;
+  const svg = d3.select("#graph").attr("width", w).attr("height", h).attr("viewBox", `0 0 ${w} ${h}`);
+  const T = d3.transition().duration(320);
+
+  /* edges — always a cubic so d attr interpolates cleanly between layouts */
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const edges = nodes.flatMap(c => c.parents.map(p => ({ key: p + ">" + c.id, c, p: byId.get(p) })));
+  const path = e => {
+    const x1 = x(e.p), y1 = y(e.p), x2 = x(e.c), y2 = y(e.c);
+    return `M${x1},${y1} C${x1 + GAP * .5},${y1} ${x2 - GAP * .5},${y2} ${x2},${y2}`;
+  };
+  const ed = svg.selectAll("path.edge").data(edges, d => d.key);
+  ed.exit().remove();
+  ed.enter().append("path").attr("class", "edge").attr("fill", "none").attr("stroke-width", 1.6)
+    .attr("d", path).attr("opacity", 0)
+    .merge(ed).transition(T)
+    .attr("d", path)
+    .attr("stroke", d => d.c.live ? laneColour(d.c.lane) : "var(--dead)")
+    .attr("opacity", d => d.c.live ? .85 : .35);
+
+  /* nodes */
+  const nd = svg.selectAll("g.node").data(nodes, d => d.id);
+  nd.exit().remove();
+  const ne = nd.enter().append("g").attr("class", "node")
+    .attr("transform", d => `translate(${x(d)},${y(d)})`).attr("opacity", 0);
+  ne.append("circle").attr("class", "ring").attr("r", 14.5);
+  ne.append("circle").attr("class", "core").attr("r", 10);
+  ne.append("title");
+  ne.append("text").attr("class", "id").attr("y", 25).attr("text-anchor", "middle");
+  const nm = ne.merge(nd)
+    .attr("class", d => "node" + (isMerge(d) ? " merge" : ""));
+  nm.transition(T)
+    .attr("transform", d => `translate(${x(d)},${y(d)})`)
+    .attr("opacity", d => d.live ? 1 : .35);
+  nm.select("circle.core").attr("stroke", d => d.live ? laneColour(d.lane) : "var(--dead)");
+  nm.select("circle.ring").attr("stroke", d => d.live ? laneColour(d.lane) : "var(--dead)");
+  nm.select("text.id").text(d => short(d.id));
+  nm.select("title").text(d => `${short(d.id)}  ${d.msg}\nparents: ${d.parents.map(short).join(", ") || "none (root)"}`);
+
+  /* ref pills, stacked above the commit they name. HEAD is folded into the
+     pill of the branch it points at; a detached HEAD gets its own pill. */
+  const pills = [];
+  nodes.forEach(n => {
+    const names = Object.keys(s.branches).filter(b => s.branches[b] === n.id).sort();
+    if (s.head.branch && names.includes(s.head.branch))
+      names.splice(names.indexOf(s.head.branch), 1), names.unshift(s.head.branch);
+    const labels = names.map(b => ({ key: "b:" + b, text: s.head.branch === b ? `HEAD → ${b}` : b,
+      colour: laneColour(s.laneOf[b]), head: s.head.branch === b }));
+    if (!s.head.branch && s.head.detached === n.id)
+      labels.unshift({ key: "head", text: "HEAD (detached)", colour: "var(--head)", head: true });
+    labels.forEach((l, k) => pills.push({ ...l, node: n, k }));
+  });
+  const pw = t => t.length * 6.6 + 12;
+  const pg = svg.selectAll("g.pill").data(pills, d => d.key);
+  pg.exit().remove();
+  const pe = pg.enter().append("g").attr("class", "pill")
+    .attr("transform", d => `translate(${x(d.node)},${y(d.node) - 22 - d.k * 17})`);
+  pe.append("rect").attr("height", 15).attr("y", -11);
+  pe.append("text").attr("y", 0).attr("text-anchor", "middle");
+  const pm = pe.merge(pg);
+  pm.transition(T).attr("transform", d => `translate(${x(d.node)},${y(d.node) - 22 - d.k * 17})`);
+  pm.select("rect").attr("width", d => pw(d.text)).attr("x", d => -pw(d.text) / 2)
+    .attr("fill", d => d.head ? "var(--head)" : "var(--panel-2)")
+    .attr("stroke", d => d.head ? "var(--head)" : d.colour).attr("stroke-width", 1);
+  pm.select("text").text(d => d.text).attr("fill", d => d.head ? "#12181f" : d.colour);
+
+  /* flash new commits, then scroll them into view */
+  if (prevIds) {
+    nm.filter(d => !prevIds.has(d.id)).classed("flash", true)
+      .transition().delay(600).on("end", function () { d3.select(this).classed("flash", false); });
+    if (nodes.length > prevIds.size) {
+      const sc = document.getElementById("scroller");
+      sc.scrollTo({ left: sc.scrollWidth, behavior: "smooth" });
+    }
+  }
+  prevIds = new Set(s.order);
+
+  renderRefs(s);
+}
+
+function renderRefs(s) {
+  const rows = [{ path: ".git/HEAD", val: s.head.branch ? `ref: refs/heads/${s.head.branch}` : `${s.head.detached}  (detached)`, head: true }];
+  Object.keys(s.branches).sort().forEach(b => rows.push({ path: `refs/heads/${b}`, val: s.branches[b], head: false }));
+  const tr = d3.select("#refs").selectAll("tr").data(rows, d => d.path);
+  tr.exit().remove();
+  const te = tr.enter().append("tr");
+  te.append("td").attr("class", "path");
+  te.append("td").attr("class", "val");
+  const tm = te.merge(tr).order();
+  tm.select("td.path").text(d => d.path);
+  tm.select("td.val").attr("class", d => "val" + (d.head ? " head" : "")).text(d => d.val)
+    .each(function (d) {
+      if (prevRefs && prevRefs.get(d.path) !== d.val) {
+        this.classList.add("flash");
+        setTimeout(() => this.classList.remove("flash"), 600);
+      }
+    });
+  prevRefs = new Map(rows.map(r => [r.path, r.val]));
+}
+
+/* ============================================================================
+   5. LESSON — data. `needs` says whether the step can be demonstrated from
+   the current state; if not, the sandbox restarts and replays every earlier
+   step's command to get there. So the lesson is also its own fixture.
+   ========================================================================= */
+const has = (s, b) => b in s.branches;
+const on  = (s, b) => s.head.branch === b;
+const diverged = (s, a, b) => has(s, a) && has(s, b) &&
+  !isAncestor(s, s.branches[a], s.branches[b]) && !isAncestor(s, s.branches[b], s.branches[a]);
+const canFF = (s, from, to) => has(s, from) && has(s, to) &&
+  s.branches[from] !== s.branches[to] && isAncestor(s, s.branches[from], s.branches[to]);
+
+const LESSON = [
+  { title: "Look at what a branch is",
+    body: `On the right are the actual files. <code>refs/heads/main</code> holds one commit
+    id. <code>HEAD</code> holds the <strong>name</strong> of a branch. That is the entire
+    data model — everything else on this page is those two kinds of file being rewritten.`,
+    try: "git branch", expect: /^git branch\s*$/, readonly: true },
+
+  { title: "Make one",
+    body: `One new file appears, containing the same id <code>main</code> has. No commit was
+    made and nothing was copied. Two labels, one commit.`,
+    try: "git branch feature", expect: /^git branch \S+/,
+    needs: s => !has(s, "feature") },
+
+  { title: "Switch to it",
+    body: `Only <code>HEAD</code> changed: it now names <code>feature</code>. (In a real repo
+    the working files are swapped to match too — that's the three-trees sandbox's
+    department. Here we only watch the pointers.)`,
+    try: "git switch feature", expect: /^git (switch|checkout) feature/,
+    needs: s => has(s, "feature") && !on(s, "feature") },
+
+  { title: "Commit moves the branch HEAD names",
+    body: `A commit is a new object whose parent is the current tip. Then git rewrites
+    <strong>the branch HEAD points at</strong> — and only that one. <code>main</code> stays
+    where it was, because nothing wrote to its file.`,
+    try: 'git commit -m "Add login form"', expect: /^git commit/,
+    needs: s => on(s, "feature") },
+
+  { title: "Back to main",
+    body: `HEAD names <code>main</code> again, so you're standing on the older commit.
+    The login commit isn't gone or hidden; it's just not reachable from where you are.`,
+    try: "git switch main", expect: /^git (switch|checkout) main/,
+    needs: s => has(s, "main") && !on(s, "main") && canFF(s, "main", "feature") },
+
+  { title: "Fast-forward: a merge with nothing to merge",
+    body: `<code>main</code> is a direct ancestor of <code>feature</code>, so there is nothing
+    to reconcile. Git just overwrites main's file with feature's id. No new commit, no
+    trace that a branch ever existed.`,
+    try: "git merge feature", expect: /^git merge/,
+    needs: s => on(s, "main") && canFF(s, "main", "feature") },
+
+  { title: "Now make a real fork",
+    body: `Create and switch in one move. This time <code>main</code> is going to keep
+    moving while the branch does, so the two will diverge.`,
+    try: "git switch -c payments", expect: /^git (switch -c|checkout -b) \S+/,
+    needs: s => !has(s, "payments") },
+
+  { title: "Commit on the branch",
+    body: `Same as before: new object, one file rewritten. The commit lands on its own
+    lane because it was created while HEAD named <code>payments</code>.`,
+    try: 'git commit -m "Add checkout page"', expect: /^git commit/,
+    needs: s => on(s, "payments") },
+
+  { title: "Meanwhile, main moves too",
+    body: `Switch back. In a team repo this is what happens every time someone else
+    merges while your branch is open.`,
+    try: "git switch main", expect: /^git (switch|checkout) main/,
+    needs: s => has(s, "payments") && !on(s, "main") },
+
+  { title: "…and commits",
+    body: `Two tips, one shared ancestor — the <strong>merge base</strong>. Neither branch is
+    an ancestor of the other any more, so a fast-forward is impossible. Something has
+    to give.`,
+    try: 'git commit -m "Bump version"', expect: /^git commit/,
+    needs: s => on(s, "main") && has(s, "payments") && !diverged(s, "main", "payments") },
+
+  { title: "Merge: a commit with two parents",
+    body: `Git finds the merge base, combines both sides, and records the result as a
+    commit with <strong>two parents</strong>. Both histories survive untouched; the graph
+    grows a loop. The double ring marks it.`,
+    try: "git merge payments", expect: /^git merge/,
+    needs: s => on(s, "main") && diverged(s, "main", "payments") },
+
+  { title: "Undo it — reset is just a pointer move",
+    body: `The merge commit still exists in the object store; <code>main</code> just doesn't
+    point at it any more. Nothing reaches it, so it fades. Git garbage-collects
+    unreachable commits eventually, which is why "undo" is so cheap.`,
+    try: "git reset --hard HEAD~1", expect: /^git reset/,
+    needs: s => on(s, "main") && isMerge(s.commits[headId(s)]) },
+
+  { title: "Rebase: the other way to combine",
+    body: `Instead of tying the branches together, rebase <strong>replays</strong> the branch's
+    commits on top of main, as though they'd been written after "Bump version".
+    You run it from the branch being moved.`,
+    try: "git switch payments", expect: /^git (switch|checkout) payments/,
+    needs: s => !on(s, "payments") && diverged(s, "main", "payments") },
+
+  { title: "Replay",
+    body: `Watch the right edge. The old commit doesn't move — a <strong>copy</strong> appears
+    with a new parent and therefore a new id, and <code>payments</code> is pointed at the
+    copy. The original is orphaned. This is why you never rebase a branch someone else
+    has: their copy still has the old ids.`,
+    try: "git rebase main", expect: /^git rebase/,
+    needs: s => on(s, "payments") && diverged(s, "main", "payments") },
+
+  { title: "Now the merge is a fast-forward",
+    body: `Back on <code>main</code>, payments is once again a straight line ahead of it.`,
+    try: "git switch main", expect: /^git (switch|checkout) main/,
+    needs: s => !on(s, "main") && canFF(s, "main", "payments") },
+
+  { title: "Linear history",
+    body: `No merge commit, no loop. Same final content as the two-parent merge, different
+    shape. Teams that rebase-then-fast-forward get a straight line at the cost of
+    rewriting the branch's ids.`,
+    try: "git merge payments", expect: /^git merge/,
+    needs: s => on(s, "main") && canFF(s, "main", "payments") },
+
+  { title: "Delete the branch",
+    body: `One file removed. Every commit it named is still reachable from
+    <code>main</code>, so nothing fades. <code>-d</code> refuses when a branch has commits
+    HEAD can't reach; <code>-D</code> doesn't.`,
+    try: "git branch -d payments", expect: /^git branch -[dD]/,
+    needs: s => has(s, "payments") && on(s, "main") && isAncestor(s, s.branches.payments, headId(s)) },
+
+  { title: "Detached HEAD",
+    body: `<code>HEAD</code> can hold a commit id directly instead of a branch name. Commits
+    made here move HEAD alone, and switching away leaves them with no ref pointing at
+    them — unless you <code>git switch -c</code> first. That's the whole "detached HEAD"
+    warning.`,
+    try: "git switch --detach HEAD~2", expect: /^git (switch --detach|checkout)\s/,
+    needs: s => !!s.head.branch },
+
+  { title: "Free play",
+    body: `The whole registry is open — <code>help</code> lists it. Try <code>git merge
+    --no-ff</code>, <code>cherry-pick</code>, or a rebase of a branch with three commits,
+    and keep one eye on the file listing.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   6. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (!quiet) (res.out || []).forEach(o => log(o.text, o.cls));
+  if (quiet) return;
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Branch sandbox loaded. Type 'help' for the command list.", "dim");
+</script>
+</body>
+</html>

@@ -66,7 +66,8 @@ button.try:hover{background:rgba(176,139,232,.12)}
 .trees{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
   overflow:hidden}
 .grid{display:grid;grid-template-columns:1fr 46px 1fr 46px 1fr;align-items:center}
-.lane-head{padding:12px 10px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+.lane-head{padding:12px 10px;border-bottom:1px solid var(--line);background:var(--panel-2);
+  align-self:stretch}
 .lane-head .t{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;
   text-transform:uppercase}
 .lane-head .s{font-size:10.5px;color:var(--ink-faint);font-family:var(--code)}
@@ -85,8 +86,11 @@ button.try:hover{background:rgba(176,139,232,.12)}
 .card.absent .fn{color:var(--ink-faint)}
 .card.dirty{border-color:var(--unstaged)}
 .card.new{border-color:var(--staged)}
+/* a tracked file that is missing from a lane is a deletion, not an absence */
+.card.absent.dirty,.card.absent.new{opacity:.75}
+.card.absent.dirty .fn,.card.absent.new .fn{text-decoration:line-through}
 .conn{display:flex;justify-content:center;align-items:center;height:100%}
-.conn svg{overflow:visible;cursor:pointer}
+.conn svg{overflow:visible;cursor:pointer;border-radius:var(--r)}
 .conn .chip{font-family:var(--code);font-size:11px;font-weight:700}
 .empty{padding:26px 14px;color:var(--ink-faint);font-family:var(--code);font-size:12.5px}
 
@@ -175,9 +179,9 @@ footer code{font-family:var(--code)}
              aria-label="git command" placeholder="git status">
     </div>
   </div>
-  <p class="hintbar">Try <code>help</code> · <code>edit app.js</code> ·
+  <p class="hintbar">Try <code>help</code> · <code>edit app.js</code> · <code>rm app.js</code> ·
   <code>git add .</code> · <code>git reset --hard HEAD~1</code> · ↑ for history ·
-  tap a <code>≠</code> to diff</p>
+  tap a <code>≠</code> to diff that file</p>
 
   <footer>
     <strong>Engine notes.</strong> Everything below the fold is four separable parts:
@@ -247,13 +251,16 @@ function resolve(s, ref) {
    `cls` drives colour in the log only; no reducer ever touches the DOM.
    ========================================================================= */
 const line = (text, cls = "ok") => ({ text, cls });
-const fail = msg => ({ out: [line(msg, "err")] });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
 
 function targets(s, args) {
   const paths = args.filter(a => !a.startsWith("-"));
-  if (paths.includes(".")) return Object.keys(s.worktree);
+  /* "." means everything git can see: files on disk plus tracked files
+     that have been deleted from disk (so `git add .` stages removals). */
+  if (paths.includes(".")) return [...new Set([...Object.keys(s.worktree), ...Object.keys(s.index)])];
   return paths;
 }
+const known = (s, f) => f in s.index || f in headTree(s);
 
 const REGISTRY = {
 
@@ -271,15 +278,48 @@ const REGISTRY = {
   "git add": (s, args) => {
     const paths = targets(s, args);
     if (!paths.length) return fail("Nothing specified, nothing added.");
-    const n = clone(s), moved = [];
+    const n = clone(s), out = [];
     for (const f of paths) {
-      if (!(f in n.worktree)) return fail(`fatal: pathspec '${f}' did not match any files`);
-      if (n.index[f] !== n.worktree[f]) moved.push(f);
-      n.index[f] = n.worktree[f];
+      if (f in n.worktree) {
+        if (n.index[f] !== n.worktree[f]) out.push(line(`staged ${f}  worktree → index`, "add"));
+        n.index[f] = n.worktree[f];
+      } else if (f in n.index) {
+        /* deleted on disk but still in the index: add stages the removal */
+        delete n.index[f];
+        out.push(line(`staged deletion of ${f}  worktree → index`, "add"));
+      } else {
+        return fail(`fatal: pathspec '${f}' did not match any files`);
+      }
     }
-    return { state: n, out: moved.length
-      ? moved.map(f => line(`staged ${f}  worktree → index`, "add"))
+    return { state: n, out: out.length ? out
       : [line("nothing to stage — index already matches", "dim")] };
+  },
+
+  /* Plain rm is your shell, not git: only the working directory changes. */
+  "rm": (s, args) => {
+    const f = args[0];
+    if (!f) return fail("rm: name a file, e.g. rm app.js");
+    if (!(f in s.worktree)) return fail(`rm: ${f}: No such file or directory`);
+    const n = clone(s);
+    delete n.worktree[f];
+    return { state: n, out: [line(`deleted ${f} from the working directory`, "mod")] };
+  },
+
+  /* git rm removes from worktree AND index in one move; --cached leaves the
+     file on disk and only forgets it in the index. */
+  "git rm": (s, args) => {
+    const cached = args.includes("--cached");
+    const paths = targets(s, args);
+    if (!paths.length) return fail("fatal: No pathspec was given. Which files should I remove?");
+    const n = clone(s), out = [];
+    for (const f of paths) {
+      if (!(f in n.index)) return fail(`fatal: pathspec '${f}' did not match any files`);
+      delete n.index[f];
+      if (!cached) delete n.worktree[f];
+      out.push(line(cached ? `rm '${f}'  index only — file stays on disk (now untracked)`
+                           : `rm '${f}'  worktree and index — deletion is staged`, "mod"));
+    }
+    return { state: n, out };
   },
 
   "git restore": (s, args) => {
@@ -288,11 +328,14 @@ const REGISTRY = {
     if (!paths.length) return fail("fatal: you must specify path(s) to restore");
     const n = clone(s), h = headTree(n), out = [];
     for (const f of paths) {
+      if (!known(s, f)) return fail(`error: pathspec '${f}' did not match any file(s) known to git`);
       if (staged) {
+        if (n.index[f] === h[f]) { out.push(line(`${f} already matches HEAD in the index`, "dim")); continue; }
         if (f in h) n.index[f] = h[f]; else delete n.index[f];
         out.push(line(`unstaged ${f}  HEAD → index`, "mod"));
       } else {
-        if (!(f in n.index)) return fail(`error: pathspec '${f}' did not match any file known to git`);
+        if (!(f in n.index)) return fail(`error: pathspec '${f}' did not match any file(s) known to git`);
+        if (n.worktree[f] === n.index[f]) { out.push(line(`${f} already matches the index`, "dim")); continue; }
         n.worktree[f] = n.index[f];
         out.push(line(`discarded changes in ${f}  index → worktree`, "mod"));
       }
@@ -306,7 +349,13 @@ const REGISTRY = {
     const h = headTree(s);
     const same = Object.keys({ ...h, ...s.index })
       .every(f => h[f] === s.index[f]);
-    if (same) return { out: [line("nothing to commit, working tree clean", "dim")] };
+    if (same) {
+      const dirty = Object.keys({ ...s.index, ...s.worktree })
+        .some(f => s.index[f] !== s.worktree[f]);
+      return { out: [line(dirty
+        ? 'no changes added to commit (use "git add" — commit reads the index, not your files)'
+        : "nothing to commit, working tree clean", "dim")] };
+    }
     const n = clone(s), id = hex() + hex().slice(0, 2);
     n.commits[id] = { id, msg, parent: n.branches[n.head], tree: { ...n.index } };
     n.order.push(id);
@@ -324,7 +373,9 @@ const REGISTRY = {
       const inH = f in h, inI = f in s.index, inW = f in s.worktree;
       if (inI && !inH) staged.push(`new file:   ${f}`);
       else if (inI && inH && h[f] !== s.index[f]) staged.push(`modified:   ${f}`);
+      else if (!inI && inH) staged.push(`deleted:    ${f}`);
       if (inW && inI && s.index[f] !== s.worktree[f]) unstaged.push(`modified:   ${f}`);
+      else if (!inW && inI) unstaged.push(`deleted:    ${f}`);
       if (inW && !inI) untracked.push(f);
     }
     if (staged.length) {
@@ -348,16 +399,20 @@ const REGISTRY = {
     const staged = args.includes("--staged") || args.includes("--cached");
     const a = staged ? headTree(s) : s.index;
     const b = staged ? s.index : s.worktree;
+    const only = args.filter(x => !x.startsWith("-"));
     const out = [];
     for (const f of fileNames(s)) {
+      if (only.length && !only.includes(f)) continue;
       if (a[f] === b[f]) continue;
-      if (!(f in b)) continue;
+      if (!(f in a) && !(f in b)) continue;
+      if (!staged && !(f in a)) continue;           /* untracked: diff ignores it */
       out.push(line(`diff --git a/${f} b/${f}`, "ok"));
-      out.push(line(`- blob ${a[f] || "(none)"}`, "err"));
-      out.push(line(`+ blob ${b[f]}`, "add"));
+      if (f in a) out.push(line(`- blob ${a[f]}`, "err"));
+      out.push(line(f in b ? `+ blob ${b[f]}` : `+ (deleted)`, f in b ? "add" : "err"));
     }
     return { out: out.length ? out
-      : [line(staged ? "no staged changes" : "no unstaged changes", "dim")] };
+      : [line(staged ? "index matches HEAD — no staged changes"
+                     : "working directory matches index — no unstaged changes", "dim")] };
   },
 
   "git reset": (s, args) => {
@@ -396,8 +451,10 @@ const REGISTRY = {
 
   "help": () => ({ out: [
     line("edit <file>              change a file (git isn't watching)", "ok"),
+    line("rm <file>                delete a file (git isn't watching)", "ok"),
     line("git status               compare all three trees", "ok"),
-    line("git add <file|.>         worktree → index", "ok"),
+    line("git add <file|.>         worktree → index (stages deletions too)", "ok"),
+    line("git rm [--cached] <file> delete from worktree and index (or index only)", "ok"),
     line("git commit -m \"msg\"      index → new commit", "ok"),
     line("git restore --staged <f> HEAD → index (unstage)", "ok"),
     line("git restore <f>          index → worktree (discard)", "ok"),
@@ -453,6 +510,13 @@ function render(s) {
     if (k.startsWith("conn")) {
       enter.append("div").attr("class", "cell conn " + k)
         .append("svg").attr("width", 40).attr("height", 34)
+        .attr("tabindex", 0).attr("role", "button")
+        .attr("aria-label", d => k === "conn-a"
+          ? `diff ${d.name}: working directory vs index`
+          : `diff ${d.name}: index vs HEAD`)
+        .on("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.dispatchEvent(new Event("click")); }
+        })
         .call(g => { g.append("line"); g.append("text").attr("class", "chip"); });
     } else {
       enter.append("div").attr("class", "cell " + k)
@@ -467,11 +531,13 @@ function render(s) {
     all.select(".cell." + lane + " .card")
       .attr("class", d => {
         const v = d[lane];
-        if (v === null) return "card absent";
-        let cls = "card";
-        if (lane === "wd" && d.ix !== null && d.wd !== d.ix) cls += " dirty";
-        if (lane === "wd" && d.ix === null) cls += " dirty";
-        if (lane === "ix" && d.ix !== d.hd) cls += " new";
+        let cls = v === null ? "card absent" : "card";
+        /* colour the lane whose content differs from the lane to its right:
+           amber for worktree≠index, green for index≠HEAD. A missing card
+           still gets the colour when the lane to its right has the file —
+           that's a deletion, and it's a diff like any other. */
+        if (lane === "wd" && d.wd !== d.ix && (v !== null || d.ix !== null)) cls += " dirty";
+        if (lane === "ix" && d.ix !== d.hd && (v !== null || d.hd !== null)) cls += " new";
         return cls;
       })
       .call(sel => {
@@ -493,9 +559,9 @@ function render(s) {
       .text(d => d[from] === d[to] ? "=" : "\u2260");
   };
   all.select(".conn-a svg").call(conn, "wd", "ix", "var(--unstaged)")
-     .on("click", () => run("git diff"));
+     .on("click", (e, d) => run(`git diff ${d.name}`));
   all.select(".conn-b svg").call(conn, "ix", "hd", "var(--staged)")
-     .on("click", () => run("git diff --staged"));
+     .on("click", (e, d) => run(`git diff --staged ${d.name}`));
 
   /* flash whatever blob changed since the last render */
   if (previous) {
@@ -564,13 +630,19 @@ function renderGraph(s) {
 
 /* ============================================================================
    5. LESSON — data. A new lesson is a new object, not new code.
+
+   Fields:  title, body (html), try (the suggested command),
+            expect  — regex a typed command must match to advance,
+            readonly — advance even though the command changes no state,
+            needs   — predicate the sandbox must satisfy for the step to be
+                      demonstrable; if false, `setup` runs (logged) on entry.
    ========================================================================= */
 const LESSON = [
   { title: "Start by looking",
     body: `Every file exists in three versions at once: the one on disk, the one
     git has <strong>staged</strong> for the next commit, and the one in the last commit.
     Right now all three match, so every connector reads <code>=</code>.`,
-    try: "git status", expect: /^git status/ },
+    try: "git status", expect: /^git status/, readonly: true },
 
   { title: "Change something",
     body: `Editing a file only touches the <strong>working directory</strong>. Git doesn't
@@ -597,33 +669,50 @@ const LESSON = [
     try: "edit notes.md", expect: /^(edit|touch)\s+\S+/ },
 
   { title: "Unstage without losing work",
-    body: `Stage an edit, then run this. <code>--staged</code> copies
-    <strong>HEAD → index</strong>, moving right to left. Your working file is
+    body: `<code>app.js</code> has been edited and staged for you. <code>--staged</code>
+    copies <strong>HEAD → index</strong>, moving right to left. Your working file is
     untouched — the edit survives, it's just no longer queued.`,
-    try: "git restore --staged app.js", expect: /^git (restore|checkout).*--staged/ },
+    try: "git restore --staged app.js", expect: /^git (restore|checkout).*--staged/,
+    needs: s => s.index["app.js"] !== headTree(s)["app.js"],
+    setup: ["edit app.js", "git add app.js"] },
 
   { title: "Discard, which does lose work",
     body: `Without <code>--staged</code>, restore copies <strong>index → working
     directory</strong> and your edit is overwritten. Same verb, opposite direction,
     very different consequences.`,
-    try: "git restore app.js", expect: /^git (restore|checkout)(?!.*--staged)/ },
+    try: "git restore app.js", expect: /^git (restore|checkout)(?!.*--staged)/,
+    needs: s => s.worktree["app.js"] !== s.index["app.js"],
+    setup: ["edit app.js"] },
+
+  { title: "Deleting is just another diff",
+    body: `A missing file is a version too. <code>git rm</code> removes the file from
+    the working directory <em>and</em> the index in one move, so the deletion is
+    already staged. Plain <code>rm</code> would only touch the left lane, and
+    <code>git add</code> would stage it. Watch how the reset steps treat this.`,
+    try: "git rm README.md", expect: /^(git )?rm\s/,
+    needs: s => "README.md" in s.index, setup: [] },
 
   { title: "reset --soft moves one thing",
     body: `Reset is only confusing until you count trees. <code>--soft</code> moves
     the branch pointer and stops. Index and working directory stay exactly where
-    they were, so the undone commit's contents are still staged.`,
-    try: "git reset --soft HEAD~1", expect: /^git reset.*--soft/ },
+    they were, so the undone commit's contents (and that staged deletion) are
+    still staged.`,
+    try: "git reset --soft HEAD~1", expect: /^git reset.*--soft/,
+    needs: s => headCommit(s).parent !== null, setup: ["restart", "edit app.js", "git add app.js", 'git commit -m "Tweak app"'] },
 
   { title: "reset --mixed moves two",
     body: `The default. Branch pointer moves, then the index is overwritten from
-    the new HEAD. Your edits survive in the working directory, unstaged.`,
-    try: "git reset --mixed HEAD~1", expect: /^git reset(?!.*--(soft|hard))/ },
+    the new HEAD. Your edits survive in the working directory, unstaged — the
+    deleted README is still missing from disk, but git no longer plans to commit that.`,
+    try: "git reset --mixed HEAD~1", expect: /^git reset(?!.*--(soft|hard))/,
+    needs: s => headCommit(s).parent !== null, setup: ["restart", "edit app.js", "git add app.js", 'git commit -m "Tweak app"'] },
 
   { title: "reset --hard moves all three",
     body: `Branch, index, and working directory all snap to the target commit.
     This is the only one that destroys uncommitted work — and the reason the
-    other two flags exist.`,
-    try: "git reset --hard HEAD~1", expect: /^git reset.*--hard/ },
+    other two flags exist. It also resurrects the README.`,
+    try: "git reset --hard HEAD~1", expect: /^git reset.*--hard/,
+    needs: s => headCommit(s).parent !== null, setup: ["restart", "edit app.js", "git add app.js", 'git commit -m "Tweak app"'] },
 
   { title: "Free play",
     body: `The whole registry is open. <code>help</code> lists it. Every command
@@ -647,16 +736,20 @@ function log(text, cls) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-function run(raw) {
+function run(raw, { silent = false } = {}) {
   if (!raw.trim()) return;
   log(raw, "cmd");
   const res = dispatch(state, raw);
   if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
   if (res.state) state = res.state;
   (res.out || []).forEach(o => log(o.text, o.cls));
   render(state);
+  if (silent) return;
+  /* advance only when the command matched AND actually moved something —
+     a matching command that changes nothing teaches nothing. */
   const s = LESSON[step];
-  if (s && s.expect && s.expect.test(raw.trim()) && !res.out?.some(o => o.cls === "err")
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
       && step < LESSON.length - 1) {
     setTimeout(() => { step++; renderLesson(); }, 550);
   }
@@ -664,6 +757,10 @@ function run(raw) {
 
 function renderLesson() {
   const s = LESSON[step];
+  if (s.needs && !s.needs(state) && s.setup?.length) {
+    log(`(sandbox: setting up "${s.title}")`, "dim");
+    s.setup.forEach(c => run(c, { silent: true }));
+  }
   document.getElementById("step-no").textContent =
     String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
   document.getElementById("step-title").textContent = s.title;
