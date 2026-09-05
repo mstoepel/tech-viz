@@ -12,6 +12,7 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 | 02 | Git | [git/branching.html](git/branching.html) | Branches as pointers, fast-forward vs merge commit, rebase, detached HEAD |
 | 03 | Git | [git/remotes.html](git/remotes.html) | Local vs origin, why `origin/main` is stale until fetch, rejected push, pull as fetch+merge or rebase, force push |
 | 01 | Docker | [docker/layers.html](docker/layers.html) | Content-addressed layers, cache invalidation, Dockerfile ordering, copy-on-write, prune |
+| 02 | Docker | [docker/networking.html](docker/networking.html) | Network namespaces, the default vs user-defined bridge, published ports as DNAT through the host, embedded DNS, bind addresses, network isolation, host mode; every connection attempt traced to where it fails |
 | 01 | Kubernetes | [k8s/reconciliation.html](k8s/reconciliation.html) | kubectl writes desired state; controllers run per tick and close the gap: self-healing, scaling, node loss, rolling update, undo, garbage collection |
 | 01 | Databases | [db/transactions.html](db/transactions.html) | Two interleaved transactions; dirty, non-repeatable and phantom reads, row locks, and a serialization failure, one isolation level at a time |
 | 01 | AI systems | [ai/agent-loop.html](ai/agent-loop.html) | The agent loop: the model as a stateless function over the whole context, tool calls and results as text, retries, runtime stop conditions, memory as a tool, compaction |
@@ -20,8 +21,8 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 | 03 | AI systems | [ai/diffusion.html](ai/diffusion.html) | Diffusion on a 2D point cloud: fixed forward noising on a cosine schedule, the exact Bayes denoiser as the model, DDIM sampling, step count, classifier-free guidance, memorisation vs generalisation |
 | 04 | AI systems | [ai/post-training.html](ai/post-training.html) | Post-training on a categorical policy over seven answers: SFT cross-entropy, Bradley-Terry reward model from biased labeler comparisons, RLHF policy gradient with a KL leash, reward hacking, the closed-form optimum, DPO |
 
-All planned topics are built. Candidates for the next round: Docker networking, DNS resolution,
-TLS handshake, B-tree indexes, consistent hashing, git object store.
+Candidates for the next round: DNS resolution, TLS handshake, B-tree indexes, consistent
+hashing, git object store.
 
 The transformer page is the first numeric-simulation sandbox: the terminal is still there for
 the lesson, but the controls are also clickable and the state is a tiny forward pass rather

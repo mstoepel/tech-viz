@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>localhost is a lie — a docker networking sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Each network gets a hue so "which namespace am I in" is a colour. The
+   host is amber. A connection that got through is green; where it died
+   is red. Published ports are the only amber things inside a container.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --host:#e8a33d; --ok:#6fbf73; --bad:#e06c6c; --warn:#e8a33d;
+  --n0:#b08be8; --n1:#5cc8d6; --n2:#e07aa8; --n3:#c9b458;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--host)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--n0);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--n0);color:var(--n0)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--n0);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the host as an outer box with its published ports on the
+   boundary, networks as bands inside it, containers as cards inside those,
+   and the last connection attempt drawn as an arrow that is green until
+   the point where it died.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.stage{display:grid;grid-template-columns:1fr 290px;gap:12px;align-items:start}
+.hostbox{position:relative;margin:12px;border:1.5px solid var(--host);border-radius:6px;padding:10px 12px 12px;min-height:200px}
+.hosthdr{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-family:var(--code);font-size:11px;color:var(--host);margin-bottom:8px}
+.hosthdr .ports{display:flex;gap:6px;flex-wrap:wrap}
+.pipe{border:1px solid var(--host);border-radius:999px;padding:1px 8px;font-size:10.5px;background:rgba(232,163,61,.08)}
+.pipe.lo{border-style:dashed}
+.pipe.hit{background:var(--host);color:#12181f}
+.hosthdr .none{color:var(--ink-faint)}
+.band{border:1px dashed var(--line);border-radius:var(--r);padding:8px 10px;margin-top:8px;position:relative}
+.band .bh{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);margin-bottom:6px}
+.band .bh b{font-family:var(--mono);font-weight:700;font-size:11px}
+.band .bh .dns{color:var(--ok)} .band .bh .nodns{color:var(--bad)}
+.cards{display:flex;gap:8px;flex-wrap:wrap;min-height:20px}
+.card{border:1.5px solid var(--line);border-radius:var(--r);padding:6px 9px;background:var(--bg);font-family:var(--code);font-size:10.5px;min-width:150px;position:relative}
+.card .n{font-family:var(--mono);font-weight:700;font-size:12px;color:var(--ink)}
+.card .n small{font-weight:400;color:var(--ink-faint);font-size:10px}
+.card .ip{color:var(--ink-dim)}
+.card .ls{color:var(--ink-faint);margin-top:2px}
+.card .ls i{font-style:normal;color:var(--ink-dim)} .card .ls i.lo{color:var(--bad)}
+.card .also{color:var(--ink-faint);font-size:9.5px;margin-top:2px}
+.card .badge{position:absolute;top:-8px;right:6px;font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:0 6px;border-radius:3px;color:#12181f}
+.card .badge.src{background:var(--ink-dim)} .card .badge.dst{background:var(--ok)} .card .badge.dst.fail{background:var(--bad)}
+.card.hostmode{border-style:dashed;border-color:var(--host)}
+.band .empty{font-family:var(--code);font-size:10.5px;color:var(--ink-faint)}
+svg.route{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+svg.route path{fill:none;stroke-width:2;stroke-linecap:round}
+svg.route path.ok{stroke:var(--ok)} svg.route path.bad{stroke:var(--bad);stroke-dasharray:5 4} svg.route path.warn{stroke:var(--warn);stroke-dasharray:5 4}
+svg.route text{font-family:var(--code);font-size:9.5px;paint-order:stroke;stroke:#12181f;stroke-width:3px}
+svg.route text.ok{fill:var(--ok)} svg.route text.bad{fill:var(--bad)} svg.route text.warn{fill:var(--warn)}
+.trace{padding:10px 12px;font-family:var(--code);font-size:11px;display:flex;flex-direction:column;gap:6px;min-height:120px}
+.trace .t{display:grid;grid-template-columns:18px 1fr;gap:6px;color:var(--ink-dim);line-height:1.45}
+.trace .t .ic{text-align:center} .trace .t.ok .ic{color:var(--ok)} .trace .t.bad .ic{color:var(--bad)} .trace .t.bad{color:var(--ink)} .trace .t.warn .ic{color:var(--warn)}
+.trace .t .k{color:var(--ink-faint);font-size:10px;letter-spacing:.06em;text-transform:uppercase;display:block}
+.trace .none{color:var(--ink-faint)}
+.verdict{padding:8px 12px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;letter-spacing:.06em}
+.verdict.ok{color:var(--ok)} .verdict.bad{color:var(--bad)} .verdict.warn{color:var(--warn)} .verdict.none{color:var(--ink-faint)}
+.cheats{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);border-top:1px solid var(--line);line-height:1.7}
+.cheats b{color:var(--ink-dim);font-weight:400}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--n0)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--ok)} .log .mod{color:var(--host)} .log .err{color:var(--bad)} .log .h{color:var(--host)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--n0)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:800px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 02 · Containers</p>
+  <h1><em>localhost</em> means a different machine depending on where you're standing</h1>
+  <p class="standfirst">Every container gets its own network namespace: its own interfaces, its
+  own IP, its own loopback. Reaching anything outside that namespace is either a route across
+  a network you both sit on, or a port punched through the host. Start containers, try
+  connections from different places, and read exactly where each one dies.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>One host, its networks, its containers</span><span class="st" id="topst"></span></div>
+      <div class="hostbox" id="hostbox">
+        <svg class="route" id="route"></svg>
+        <div class="hosthdr" id="hosthdr"></div>
+        <div id="bands"></div>
+      </div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>Last connection, step by step</span></div>
+      <div class="trace" id="trace"></div>
+      <div class="verdict none" id="verdict"></div>
+      <div class="cheats">
+        <b>from where?</b> <code>curl host …</code> or <code>curl &lt;container&gt; …</code><br>
+        <b>to what?</b> <code>localhost:80</code> · <code>web:80</code> · <code>172.17.0.2:80</code> · <code>host.docker.internal:8080</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="docker run --name web -p 8080:80 nginx">
+    </div>
+  </div>
+  <p class="hintbar"><code>docker run --name web -p 8080:80 nginx</code> · <code>curl host localhost:8080</code> ·
+  <code>docker network create app</code> · <code>docker network connect app web</code> · <code>curl api web:80</code> ·
+  <code>listen api 3000 127.0.0.1</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. A connection attempt is a
+    pure function of the topology: resolve the name in the caller's namespace (loopback, the
+    embedded DNS of a shared user-defined network, or the host's aliases), pick a route
+    (same network, a published port DNAT'd through the host, or nothing), then check what is
+    actually listening and on which address. Images come with a default listening port
+    (nginx 80, api 3000, postgres 5432, redis 6379, metrics-agent 9100). Reaching container IPs
+    directly from the host is flagged as Linux-only, because that is the portability trap it is.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   networks: name → {subnet prefix, dns, hue, next ip}.
+   containers: name → {image, nets: {net: ip}, listen: [{port, bind}],
+                       published: [{host, cport, bind}], hostMode}.
+   ========================================================================= */
+const IMAGES = { nginx: 80, api: 3000, postgres: 5432, redis: 6379, "metrics-agent": 9100, busybox: null };
+const HOST_IP = "192.168.1.20";
+
+function initialState() {
+  return {
+    networks: { bridge: { name: "bridge", prefix: "172.17.0", dns: false, next: 2, hue: 0 } },
+    containers: {}, nextPrefix: 18, last: null
+  };
+}
+const clone = s => structuredClone(s);
+const hueOf = n => `var(--n${n % 4})`;
+
+/* ----------------------------------------------------------------------------
+   The connection. Pure: (state, from, target) → trace of steps + verdict.
+   ------------------------------------------------------------------------- */
+function connect(s, from, target) {
+  const steps = [], T = (k, text, st = "ok") => steps.push({ k, text, st });
+  const fail = (k, text) => { T(k, text, "bad"); return { steps, verdict: "bad", from, target }; };
+  const m = /^([\w.\-]+)(?::(\d+))?$/.exec(target);
+  if (!m) return fail("parse", `can't parse target "${target}" — use host:port`);
+  const hostName = m[1], port = +(m[2] || 80);
+  const src = from === "host" ? null : s.containers[from];
+  if (from !== "host" && !src) return fail("from", `no container named ${from}`);
+  const srcNs = src ? (src.hostMode ? "host" : from) : "host";
+  T("from", src ? `${from} runs in ${src.hostMode ? "the host's network namespace (--net=host)" : "its own network namespace"}; its localhost is ${src.hostMode ? "the host's" : "its own"}`
+                : `starting on the host, in the outermost namespace; localhost here is the host's own loopback`, "ok");
+
+  /* 1 — resolve */
+  let dest = null;  /* {kind:"self"|"host"|"container", name, ip, net} */
+  const isIp = /^\d+\.\d+\.\d+\.\d+$/.test(hostName);
+  if (hostName === "localhost" || hostName === "127.0.0.1") {
+    dest = srcNs === "host" ? { kind: "host", ip: "127.0.0.1" } : { kind: "self", name: from, ip: "127.0.0.1" };
+    T("resolve", `${hostName} → 127.0.0.1, the loopback of ${srcNs === "host" ? "the host" : from + " itself"}`);
+  } else if (hostName === "host.docker.internal" || hostName === HOST_IP) {
+    dest = { kind: "host", ip: HOST_IP };
+    T("resolve", hostName === HOST_IP ? `${HOST_IP} is the host's own address` : `host.docker.internal → ${HOST_IP} (a special alias the runtime injects into every container)`);
+  } else if (isIp) {
+    const owner = Object.entries(s.containers).find(([n, c]) => Object.values(c.nets).includes(hostName));
+    if (!owner) return fail("resolve", `${hostName}: no container has that address`);
+    const net = Object.entries(owner[1].nets).find(([, ip]) => ip === hostName)[0];
+    dest = { kind: "container", name: owner[0], ip: hostName, net };
+    T("resolve", `${hostName} is ${owner[0]} on network ${net} — no DNS needed`);
+  } else {
+    const tgt = s.containers[hostName];
+    if (!tgt) return fail("resolve", `${hostName}: NXDOMAIN — nothing by that name anywhere`);
+    if (srcNs === "host") return fail("resolve", `the host can't resolve "${hostName}": container names only exist in Docker's embedded DNS, which answers inside user-defined networks. From the host, use localhost:<published port>`);
+    if (tgt.hostMode) return fail("resolve", `${hostName} has no address of its own — it lives in the host's namespace. Reach it via host.docker.internal:<port>`);
+    const shared = Object.keys(src.nets).filter(n => n in tgt.nets);
+    if (!shared.length) return fail("resolve", `"${hostName}" doesn't resolve from ${from}: they share no network, so ${from}'s DNS has never heard of it`);
+    const dnsNet = shared.find(n => s.networks[n].dns);
+    if (!dnsNet) return fail("resolve", `"${hostName}" doesn't resolve: ${from} and ${hostName} share only the default bridge, which has no name resolution. Use its IP (${tgt.nets[shared[0]]}) or a user-defined network`);
+    dest = { kind: "container", name: hostName, ip: tgt.nets[dnsNet], net: dnsNet };
+    T("resolve", `embedded DNS at 127.0.0.11 (network ${dnsNet}) answers: ${hostName} → ${dest.ip}`);
+  }
+
+  /* 2 — route + 3 — listen */
+  const listening = (c, p, viaLoopback) => c.listen.find(l => l.port === p && (viaLoopback || l.bind === "0.0.0.0"));
+  const boundLo = (c, p) => c.listen.find(l => l.port === p && l.bind === "127.0.0.1");
+
+  if (dest.kind === "self") {
+    T("route", `stays inside ${from}: loopback never leaves the namespace`);
+    if (src.listen.find(l => l.port === port)) { T("listen", `${from} listens on ${port} — connected`); return { steps, verdict: "ok", from, target, to: from }; }
+    return fail("listen", `nothing listens on ${port} inside ${from}. localhost here is ${from}, not your machine and not another container`);
+  }
+  if (dest.kind === "host") {
+    const viaLo = dest.ip === "127.0.0.1";
+    T("route", srcNs === "host" ? `stays on the host` : `leaves ${from} through its eth0, out the bridge to the host`);
+    const hm = Object.entries(s.containers).find(([, c]) => c.hostMode && c.listen.find(l => l.port === port));
+    if (hm) { T("listen", `${hm[0]} (--net=host) listens on the host's port ${port} directly — connected`); return { steps, verdict: "ok", from, target, to: hm[0] }; }
+    const pub = Object.entries(s.containers).flatMap(([n, c]) => c.published.map(p => ({ ...p, name: n }))).find(p => p.host === port);
+    if (!pub) return fail("listen", `nothing listens on the host's port ${port}. Publishing a port with -p is what makes a container reachable here`);
+    if (pub.bind === "127.0.0.1" && !viaLo) return fail("route", `port ${port} is published on 127.0.0.1 only; traffic arriving on ${dest.ip} is not accepted`);
+    T("route", `-p ${pub.bind === "127.0.0.1" ? "127.0.0.1:" : ""}${port}:${pub.cport} → DNAT to ${pub.name}'s bridge address, port ${pub.cport}`, "ok");
+    const c = s.containers[pub.name];
+    if (listening(c, pub.cport, false)) { T("listen", `${pub.name} listens on 0.0.0.0:${pub.cport} — connected`); return { steps, verdict: "ok", from, target, to: pub.name, via: port }; }
+    if (boundLo(c, pub.cport)) return fail("listen", `${pub.name}'s process listens on 127.0.0.1:${pub.cport}. The DNAT'd packet arrives on eth0, not loopback, so it is refused. Bind to 0.0.0.0 inside the container`);
+    return fail("listen", `${pub.name} isn't listening on ${pub.cport} at all`);
+  }
+  /* container destination */
+  const tgt = s.containers[dest.name];
+  if (srcNs === "host") {
+    T("route", `the host can reach ${dest.ip} through docker0 on Linux — but not on Docker Desktop (Mac/Windows), where the bridge lives inside a VM`, "warn");
+    if (listening(tgt, port, false)) { T("listen", `${dest.name} listens on 0.0.0.0:${port}`, "warn"); return { steps, verdict: "warn", from, target, to: dest.name }; }
+    return fail("listen", `${dest.name} isn't listening on 0.0.0.0:${port}`);
+  }
+  if (!(dest.net in src.nets)) {
+    const shared = Object.keys(src.nets).filter(n => n in tgt.nets);
+    if (!shared.length) return fail("route", `no route: ${from} is on ${Object.keys(src.nets).join("+")}, ${dest.name}'s address ${dest.ip} is on ${dest.net}. Networks are isolated from each other`);
+    dest.net = shared[0]; dest.ip = tgt.nets[shared[0]];
+  }
+  T("route", `same network (${dest.net}): straight across the bridge to ${dest.ip}`);
+  if (listening(tgt, port, false)) { T("listen", `${dest.name} listens on 0.0.0.0:${port} — connected`); return { steps, verdict: "ok", from, target, to: dest.name }; }
+  if (boundLo(tgt, port)) return fail("listen", `${dest.name}'s process listens on 127.0.0.1:${port} — only reachable from inside ${dest.name}. Bind to 0.0.0.0`);
+  return fail("listen", `${dest.name} isn't listening on ${port}`);
+}
+
+/* ============================================================================
+   2. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const flagVal = (args, f) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : null; };
+
+/* lowest free address on the network, like Docker's IPAM: a removed
+   container's address is reused by the next one to start */
+function allocate(n, net) {
+  const N = n.networks[net];
+  const used = new Set(Object.values(n.containers).map(c => c.nets[net]).filter(Boolean));
+  let k = 2; while (used.has(`${N.prefix}.${k}`)) k++;
+  return `${N.prefix}.${k}`;
+}
+
+const REGISTRY = {
+  "docker run": (s, args) => {
+    const name = flagVal(args, "--name") || "c" + Object.keys(s.containers).length;
+    if (s.containers[name]) return fail(`Error: the container name "/${name}" is already in use`);
+    const image = args.filter((a, i) => !a.startsWith("-") && args[i - 1] !== "--name" && args[i - 1] !== "-p" && args[i - 1] !== "--network" && args[i - 1] !== "--net").pop();
+    if (!image || !(image in IMAGES)) return fail(`unknown image "${image || ""}" — try ${Object.keys(IMAGES).join(", ")}`);
+    const n = clone(s);
+    const net = flagVal(args, "--network") || flagVal(args, "--net") || (args.find(a => a.startsWith("--net=") || a.startsWith("--network=")) || "").split("=")[1] || "bridge";
+    const hostMode = net === "host";
+    if (!hostMode && !n.networks[net]) return fail(`Error: network ${net} not found`);
+    const c = { image, nets: {}, listen: IMAGES[image] ? [{ port: IMAGES[image], bind: "0.0.0.0" }] : [], published: [], hostMode };
+    const out = [];
+    if (!hostMode) c.nets[net] = allocate(n, net);
+    args.forEach((a, i) => { if (a === "-p") { const pm = /^(?:(127\.0\.0\.1|0\.0\.0\.0):)?(\d+):(\d+)$/.exec(args[i + 1] || "");
+      if (!pm) { out.push(line(`ignoring -p ${args[i + 1]}: use HOST:CONTAINER or 127.0.0.1:HOST:CONTAINER`, "err")); return; }
+      if (hostMode) { out.push(line(`-p ignored: with --net=host there is nothing to publish, the container already sits on the host's ports`, "mod")); return; }
+      const taken = Object.values(n.containers).flatMap(x => x.published).find(p => p.host === +pm[2]);
+      if (taken) { out.push(line(`Error: host port ${pm[2]} is already published`, "err")); return; }
+      c.published.push({ host: +pm[2], cport: +pm[3], bind: pm[1] || "0.0.0.0" }); } });
+    n.containers[name] = c; n.last = null;
+    out.unshift(line(hostMode ? `${name} started with --net=host: no IP of its own, listens on the host's ${IMAGES[image] || "(no)"} port directly`
+      : `${name} started on ${net} at ${c.nets[net]}${IMAGES[image] ? `, listening on 0.0.0.0:${IMAGES[image]}` : ""}${c.published.length ? ` · published ${c.published.map(p => `${p.bind === "127.0.0.1" ? "127.0.0.1:" : ""}${p.host}→${p.cport}`).join(", ")}` : ""}`, "add"));
+    return { state: n, out };
+  },
+  "docker network": (s, args) => {
+    const [verb, a, b] = args;
+    if (verb === "create") { if (!a || s.networks[a] || a === "host") return fail(`usage: docker network create <name>`); const n = clone(s);
+      n.networks[a] = { name: a, prefix: `172.${n.nextPrefix++}.0`, dns: true, next: 2, hue: Object.keys(n.networks).length };
+      return { state: n, out: [line(`network ${a} created: ${n.networks[a].prefix}.0/16, with embedded DNS (containers resolve each other by name)`, "add")] }; }
+    if (verb === "connect") { if (!s.networks[a] || !s.containers[b]) return fail("usage: docker network connect <network> <container>"); const c = s.containers[b];
+      if (c.hostMode) return fail(`${b} uses the host's namespace and can't join a bridge network`); if (c.nets[a]) return fail(`${b} is already on ${a}`);
+      const n = clone(s); n.containers[b].nets[a] = allocate(n, a); n.last = null;
+      return { state: n, out: [line(`${b} now also on ${a} as ${n.containers[b].nets[a]} — a second interface, a second address`, "add")] }; }
+    if (verb === "disconnect") { if (!s.networks[a] || !s.containers[b] || !s.containers[b].nets[a]) return fail("usage: docker network disconnect <network> <container>"); const n = clone(s); delete n.containers[b].nets[a]; n.last = null;
+      return { state: n, out: [line(`${b} left ${a}`, "mod")] }; }
+    if (verb === "ls" || !verb) return { out: Object.values(s.networks).map(N => line(`${N.name.padEnd(10)} ${N.prefix}.0/16   dns: ${N.dns ? "yes" : "no (default bridge)"}`)) };
+    return fail("usage: docker network create|connect|disconnect|ls");
+  },
+  "docker rm": (s, args) => { const name = args.filter(a => !a.startsWith("-"))[0]; if (!s.containers[name]) return fail(`Error: No such container: ${name}`); const n = clone(s); delete n.containers[name]; n.last = null;
+    return { state: n, out: [line(`${name} removed; its addresses and published ports are released`, "mod")] }; },
+  "docker ps": s => ({ out: [line("NAME       IMAGE          NETWORKS / ADDRESSES              PORTS", "dim"), ...Object.entries(s.containers).map(([n, c]) =>
+    line(`${n.padEnd(10)} ${c.image.padEnd(14)} ${(c.hostMode ? "host namespace" : Object.entries(c.nets).map(([k, v]) => `${k}=${v}`).join(", ")).padEnd(33)} ${c.published.map(p => `${p.bind === "127.0.0.1" ? "127.0.0.1:" : "0.0.0.0:"}${p.host}->${p.cport}`).join(", ") || (c.listen.map(l => `${l.bind}:${l.port} (not published)`).join(", "))}`))] }),
+  "docker inspect": (s, args) => { const c = s.containers[args[0]]; if (!c) return fail(`No such container: ${args[0]}`);
+    return { out: [line(`${args[0]}: ${c.hostMode ? "NetworkMode=host" : Object.entries(c.nets).map(([k, v]) => `${k}: ${v}`).join(" · ")}`), line(`listening: ${c.listen.map(l => `${l.bind}:${l.port}`).join(", ") || "nothing"} · published: ${c.published.map(p => `${p.host}→${p.cport}`).join(", ") || "nothing"}`)] }; },
+  "listen": (s, args) => { const [name, port, bind] = args; const c = s.containers[name]; if (!c || !(+port > 0)) return fail("usage: listen <container> <port> [0.0.0.0|127.0.0.1]");
+    const n = clone(s); const l = n.containers[name].listen.find(x => x.port === +port); const b = bind === "127.0.0.1" ? "127.0.0.1" : "0.0.0.0";
+    if (l) l.bind = b; else n.containers[name].listen.push({ port: +port, bind: b }); n.last = null;
+    return { state: n, out: [line(`${name}'s process now listens on ${b}:${port}`, b === "127.0.0.1" ? "err" : "add"), line(b === "127.0.0.1" ? "bound to loopback: only connections from inside the container's own namespace will be accepted" : "bound to all interfaces: reachable from the bridge and via published ports", "dim")] }; },
+  "curl": (s, args) => { const [from, target] = args; if (!from || !target) return fail("usage: curl host|<container> <host>[:port]");
+    const n = clone(s); const r = connect(n, from, target); n.last = r;
+    const cls = { ok: "add", bad: "err", warn: "mod" };
+    return { state: n, out: [...r.steps.map(st => line(`${st.st === "ok" ? "✓" : st.st === "warn" ? "△" : "✗"} ${st.k}: ${st.text}`, st.st === "ok" ? "ok" : st.st === "warn" ? "mod" : "err")),
+      line(r.verdict === "ok" ? `HTTP 200 from ${r.to}` : r.verdict === "warn" ? `connected to ${r.to} — but only because this host is Linux` : `curl: (7) Failed to connect`, cls[r.verdict])] }; },
+  "help": () => ({ out: [
+    line("docker run --name N [-p H:C] [--network X | --net=host] IMAGE", "ok"),
+    line("docker network create|connect|disconnect|ls", "ok"),
+    line("docker rm N · docker ps · docker inspect N", "ok"),
+    line("listen N PORT [0.0.0.0|127.0.0.1]     change what a container's process binds to", "ok"),
+    line("curl host|N TARGET[:PORT]              try a connection and see where it dies", "mod"),
+    line("images: nginx(80) api(3000) postgres(5432) redis(6379) metrics-agent(9100) busybox", "dim"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function tokenize(str) { return (str.match(/"[^"]*"|'[^']*'|\S+/g) || []); }
+function dispatch(state, raw) {
+  const tok = tokenize(raw.trim());
+  if (!tok.length) return null;
+  for (const n of [2, 1]) { const key = tok.slice(0, n).join(" "); if (REGISTRY[key]) return REGISTRY[key](state, tok.slice(n), raw); }
+  return fail(`${tok[0]}: command not found — try 'help'`);
+}
+
+/* ============================================================================
+   3. RENDERER
+   ========================================================================= */
+function render(s) {
+  const L = s.last;
+  const pubs = Object.entries(s.containers).flatMap(([n, c]) => c.published.map(p => ({ ...p, name: n })));
+  d3.select("#hosthdr").html(`<span>host · ${HOST_IP} · loopback 127.0.0.1</span><span class="ports">${pubs.length ? pubs.map(p => `<span class="pipe${p.bind === "127.0.0.1" ? " lo" : ""}${L && L.via === p.host ? " hit" : ""}" data-port="${p.host}">${p.bind === "127.0.0.1" ? "127.0.0.1:" : ""}${p.host} → ${p.name}:${p.cport}</span>`).join("") : `<span class="none">no published ports</span>`}</span>`);
+  d3.select("#topst").text(`${Object.keys(s.containers).length} container(s) · ${Object.keys(s.networks).length} network(s)`);
+
+  const bands = Object.values(s.networks).map(N => {
+    const members = Object.entries(s.containers).filter(([, c]) => !c.hostMode && N.name in c.nets);
+    return `<div class="band" data-net="${N.name}" style="border-color:${hueOf(N.hue)}"><div class="bh"><span><b style="color:${hueOf(N.hue)}">${N.name}</b> · ${N.prefix}.0/16 · gateway ${N.prefix}.1</span><span class="${N.dns ? "dns" : "nodns"}">${N.dns ? "embedded DNS: names resolve" : "no DNS: names don't resolve"}</span></div>
+      <div class="cards">${members.length ? members.map(([n, c]) => card(s, n, c, N.name)).join("") : `<div class="empty">no containers here</div>`}</div></div>`;
+  });
+  const hm = Object.entries(s.containers).filter(([, c]) => c.hostMode);
+  if (hm.length) bands.push(`<div class="band" data-net="host" style="border-color:var(--host)"><div class="bh"><span><b style="color:var(--host)">host namespace</b> · --net=host · no bridge, no NAT, no isolation</span><span>Linux only</span></div><div class="cards">${hm.map(([n, c]) => card(s, n, c, "host")).join("")}</div></div>`);
+  d3.select("#bands").html(bands.join(""));
+
+  /* trace panel */
+  const tr = d3.select("#trace");
+  if (!L) tr.html(`<div class="none">no connection attempted yet — try <b>curl host localhost:8080</b></div>`);
+  else tr.html(L.steps.map(st => `<div class="t ${st.st}"><span class="ic">${st.st === "ok" ? "✓" : st.st === "warn" ? "△" : "✗"}</span><span><span class="k">${st.k}</span>${st.text}</span></div>`).join(""));
+  d3.select("#verdict").attr("class", "verdict " + (L ? L.verdict : "none")).text(L ? `curl ${L.from} ${L.target} → ${L.verdict === "ok" ? "connected" : L.verdict === "warn" ? "connected, not portable" : "failed"}` : "");
+
+  /* route arrow, measured from the DOM */
+  requestAnimationFrame(() => drawRoute(s));
+}
+function card(s, n, c, net) {
+  const L = s.last; const badge = L && L.from === n ? `<span class="badge src">from</span>` : L && L.to === n ? `<span class="badge dst${L.verdict === "bad" ? " fail" : ""}">${L.verdict === "bad" ? "refused" : "to"}</span>` : (L && L.verdict === "bad" && L.target.split(":")[0] === n ? `<span class="badge dst fail">unreached</span>` : "");
+  const also = Object.keys(c.nets).filter(k => k !== net);
+  return `<div class="card${c.hostMode ? " hostmode" : ""}" data-c="${n}" data-net="${net}">${badge}<div class="n">${n} <small>${c.image}</small></div>
+    <div class="ip">${c.hostMode ? HOST_IP + " (the host's)" : c.nets[net]}</div>
+    <div class="ls">listens: ${c.listen.length ? c.listen.map(l => `<i class="${l.bind === "127.0.0.1" ? "lo" : ""}">${l.bind}:${l.port}</i>`).join(" ") : "nothing"}${c.published.length ? ` · <span style="color:var(--host)">-p ${c.published.map(p => p.host + "→" + p.cport).join(",")}</span>` : ""}</div>
+    ${also.length ? `<div class="also">also on ${also.map(k => `${k} as ${c.nets[k]}`).join(", ")}</div>` : ""}</div>`;
+}
+function drawRoute(s) {
+  const svg = d3.select("#route"); svg.html("");
+  const L = s.last; if (!L) return;
+  const box = document.getElementById("hostbox"), br = box.getBoundingClientRect();
+  const rect = el => { if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left - br.left + r.width / 2, y: r.top - br.top + r.height / 2, top: r.top - br.top, bottom: r.bottom - br.top, left: r.left - br.left, right: r.right - br.left }; };
+  const cardOf = n => { const els = [...box.querySelectorAll(`.card[data-c="${n}"]`)]; return rect(els[0]); };
+  const hostPt = () => rect(box.querySelector(".hosthdr"));
+  const A = L.from === "host" ? hostPt() : cardOf(L.from);
+  let B = L.to ? cardOf(L.to) : null;
+  if (!B) { const tn = L.target.split(":")[0]; B = s.containers[tn] ? cardOf(tn) : (/^\d/.test(tn) ? cardOf(Object.keys(s.containers).find(k => Object.values(s.containers[k].nets).includes(tn)) || "") : null); }
+  if (!A) return;
+  const cls = L.verdict;
+  const pts = [];
+  if (L.via !== undefined) { const pipe = rect(box.querySelector(`.pipe[data-port="${L.via}"]`)); if (pipe) pts.push(pipe); }
+  const end = B || (L.steps.find(st => st.k === "resolve" && st.st === "bad") ? { x: A.x + (A.x < br.width / 2 ? 90 : -90), y: A.y - 26 } : hostPt());
+  const seq = [A, ...pts, end];
+  let d = `M${seq[0].x},${seq[0].y}`;
+  for (let i = 1; i < seq.length; i++) { const p = seq[i - 1], q = seq[i]; const mx = (p.x + q.x) / 2; d += ` C${mx},${p.y} ${mx},${q.y} ${q.x},${q.y}`; }
+  svg.append("path").attr("class", cls).attr("d", d);
+  const failStep = L.steps.find(st => st.st === "bad");
+  const last = seq[seq.length - 1];
+  svg.append("circle").attr("cx", last.x).attr("cy", last.y).attr("r", 5).attr("fill", cls === "ok" ? "var(--ok)" : cls === "warn" ? "var(--warn)" : "var(--bad)");
+  svg.append("text").attr("class", cls).attr("x", last.x + 8).attr("y", last.y - 8).text(cls === "ok" ? "connected" : cls === "warn" ? "Linux only" : `✗ ${failStep ? failStep.k : "failed"}`);
+}
+
+/* ============================================================================
+   4. LESSON
+   ========================================================================= */
+const C = (s, n) => s.containers[n];
+const lastIs = (s, from, target, v) => s.last && s.last.from === from && s.last.target === target && (!v || s.last.verdict === v);
+const onNet = (s, n, net) => C(s, n) && net in C(s, n).nets;
+
+const LESSON = [
+  { title: "Start a web server",
+    body: `nginx comes up on the default bridge network with its own address, listening on
+    port 80 <em>inside its namespace</em>. Nothing on the host changed. Look at the host's
+    header: no published ports.`,
+    try: "docker run --name web nginx", expect: /^docker run --name web nginx$/,
+    needs: s => !C(s, "web") && !Object.keys(s.containers).length },
+
+  { title: "So localhost:80 on the host is empty",
+    body: `From the host, localhost is the host's loopback. The trace stops at "listen": nothing
+    on the host is listening on 80, because the thing listening on 80 is in a different
+    namespace. The bridge connects the container to the host; it does not merge them.`,
+    try: "curl host localhost:80", expect: /^curl host localhost:80$/,
+    needs: s => C(s, "web") && !C(s, "web").published.length && !lastIs(s, "host", "localhost:80") },
+
+  { title: "Publish a port",
+    body: `Remove it and start it again with <code>-p 8080:80</code>. That one flag installs a
+    NAT rule on the host: packets arriving at the host's port 8080 are rewritten to the
+    container's address, port 80. It appears as a pipe on the host boundary.`,
+    try: "docker rm web", expect: /^docker rm web$/,
+    needs: s => C(s, "web") && !C(s, "web").published.length },
+
+  { title: "…with -p",
+    body: `Same image, plus the pipe.`,
+    try: "docker run --name web -p 8080:80 nginx", expect: /^docker run --name web -p 8080:80 nginx$/,
+    needs: s => !C(s, "web") },
+
+  { title: "Through the pipe",
+    body: `Host loopback → port 8080 → DNAT → web's eth0 → port 80. The arrow bends through the
+    published port. This is the only portable way for the outside world to reach a container.`,
+    try: "curl host localhost:8080", expect: /^curl host localhost:8080$/,
+    needs: s => C(s, "web") && C(s, "web").published.some(p => p.host === 8080) && !lastIs(s, "host", "localhost:8080", "ok") },
+
+  { title: "A second container",
+    body: `An API server, also published. Now there are two namespaces beside the host's.`,
+    try: "docker run --name api -p 3000:3000 api", expect: /^docker run --name api -p 3000:3000 api$/,
+    needs: s => C(s, "web") && !C(s, "api") },
+
+  { title: "Inside api, localhost is api",
+    body: `The single most common container networking bug. Code inside api calls
+    <code>localhost:80</code> expecting the web server. But api's loopback is api's own; web
+    is on another machine as far as the kernel is concerned. Nothing listens.`,
+    try: "curl api localhost:80", expect: /^curl api localhost:80$/,
+    needs: s => C(s, "api") && C(s, "web") && !lastIs(s, "api", "localhost:80") },
+
+  { title: "By address, it works",
+    body: `Both containers sit on the default bridge, so api can reach web's address directly.
+    No host involved, no published port needed — that pipe was only for outsiders.`,
+    try: "curl api 172.17.0.2:80", expect: /^curl api 172\.17\.0\.2:80$/,
+    needs: s => C(s, "web") && C(s, "web").nets.bridge === "172.17.0.2" && C(s, "api") && !lastIs(s, "api", "172.17.0.2:80", "ok") },
+
+  { title: "By name, it doesn't",
+    body: `Addresses change every restart, so you want names. On the <em>default</em> bridge
+    they don't resolve — it predates Docker's embedded DNS and never got it. The trace dies
+    at "resolve".`,
+    try: "curl api web:80", expect: /^curl api web:80$/,
+    needs: s => C(s, "web") && C(s, "api") && !onNet(s, "web", "app") && !lastIs(s, "api", "web:80") },
+
+  { title: "Make a network of your own",
+    body: `A user-defined bridge gets its own subnet and an embedded DNS server at 127.0.0.11
+    that knows every container on it by name.`,
+    try: "docker network create app", expect: /^docker network create app$/,
+    needs: s => !s.networks.app },
+
+  { title: "Connect both containers",
+    body: `A container can be on several networks at once; each membership is another
+    interface with another address. Watch web gain a second one.`,
+    try: "docker network connect app web", expect: /^docker network connect app web$/,
+    needs: s => s.networks.app && C(s, "web") && !onNet(s, "web", "app") },
+
+  { title: "…and api",
+    body: `Now they share a network that has DNS.`,
+    try: "docker network connect app api", expect: /^docker network connect app api$/,
+    needs: s => s.networks.app && C(s, "api") && onNet(s, "web", "app") && !onNet(s, "api", "app") },
+
+  { title: "By name, on the right network",
+    body: `Resolve at 127.0.0.11, route across the app bridge, connect. This is the thing to
+    build on: user-defined network plus names. Compose does exactly this for you.`,
+    try: "curl api web:80", expect: /^curl api web:80$/,
+    needs: s => onNet(s, "web", "app") && onNet(s, "api", "app") && !lastIs(s, "api", "web:80", "ok") },
+
+  { title: "The bind-address trap",
+    body: `Make api's process listen on 127.0.0.1 instead of 0.0.0.0 — a common default in dev
+    servers. The port is still published. Try it from the host and read where it dies.`,
+    try: "listen api 3000 127.0.0.1", expect: /^listen api 3000 127\.0\.0\.1$/,
+    needs: s => C(s, "api") && C(s, "api").listen.some(l => l.port === 3000 && l.bind === "0.0.0.0") },
+
+  { title: "…refused",
+    body: `The pipe works, the DNAT works, the packet arrives on api's eth0 — and the process
+    is only accepting connections on loopback. -p can't fix a server that isn't listening on
+    the interface the traffic comes in on. Bind to 0.0.0.0 inside containers.`,
+    try: "curl host localhost:3000", expect: /^curl host localhost:3000$/,
+    needs: s => C(s, "api") && C(s, "api").listen.some(l => l.port === 3000 && l.bind === "127.0.0.1") && !lastIs(s, "host", "localhost:3000") },
+
+  { title: "Fix it",
+    body: `Back to all interfaces.`,
+    try: "listen api 3000 0.0.0.0", expect: /^listen api 3000 0\.0\.0\.0$/,
+    needs: s => C(s, "api") && C(s, "api").listen.some(l => l.port === 3000 && l.bind === "127.0.0.1") },
+
+  { title: "Isolation is the default",
+    body: `Create a second network and put a database on it, nowhere else.`,
+    try: "docker network create backend", expect: /^docker network create backend$/,
+    needs: s => !s.networks.backend },
+
+  { title: "…the database",
+    body: `Only on backend.`,
+    try: "docker run --name db --network backend postgres", expect: /^docker run --name db --network backend postgres$/,
+    needs: s => s.networks.backend && !C(s, "db") },
+
+  { title: "api can't see it",
+    body: `No shared network means no route and no name. That's a feature: the web tier has no
+    path to the database unless you draw one.`,
+    try: "curl api db:5432", expect: /^curl api db:5432$/,
+    needs: s => C(s, "db") && C(s, "api") && !onNet(s, "api", "backend") && !lastIs(s, "api", "db:5432") },
+
+  { title: "Draw the path",
+    body: `Put api on backend too. It keeps its app membership; now it has three addresses.`,
+    try: "docker network connect backend api", expect: /^docker network connect backend api$/,
+    needs: s => C(s, "db") && C(s, "api") && !onNet(s, "api", "backend") },
+
+  { title: "…now it resolves",
+    body: `Same request, one more network.`,
+    try: "curl api db:5432", expect: /^curl api db:5432$/,
+    needs: s => onNet(s, "api", "backend") && C(s, "db") && !lastIs(s, "api", "db:5432", "ok") },
+
+  { title: "Host mode: no namespace at all",
+    body: `<code>--net=host</code> skips the bridge entirely. The container shares the host's
+    interfaces; its port 9100 <em>is</em> the host's port 9100, no -p needed, no NAT, no
+    isolation. Linux only, because on Docker Desktop "the host" is a hidden VM.`,
+    try: "docker run --name metrics --net=host metrics-agent", expect: /^docker run --name metrics --net=host metrics-agent$/,
+    needs: s => !C(s, "metrics") },
+
+  { title: "…reachable on the host directly",
+    body: `No pipe on the boundary, yet it connects. The trade is every trade: convenience and
+    speed against isolation and portability.`,
+    try: "curl host localhost:9100", expect: /^curl host localhost:9100$/,
+    needs: s => C(s, "metrics") && !lastIs(s, "host", "localhost:9100", "ok") },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>curl api host.docker.internal:8080</code>
+    to reach the host from inside a container, publish on loopback only with
+    <code>-p 127.0.0.1:6379:6379</code> and see who can and can't reach it, or
+    <code>curl host 172.17.0.2:80</code> for the Linux-only shortcut.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   5. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+window.addEventListener("resize", () => drawRoute(state));
+
+render(state);
+renderLesson();
+log("Networking sandbox loaded. Type 'help', or start a container.", "dim");
+</script>
+</body>
+</html>
