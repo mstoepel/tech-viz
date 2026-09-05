@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reconciliation — a kubernetes sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Semantic colour: amber = the gap (desired ≠ observed, or a pod not yet
+   running), green = converged / running, red = failing or terminating.
+   Image versions get their own hues so a rollout reads as one colour
+   replacing another.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --gap:#e8a33d; --ok:#6fbf73; --bad:#e06c6c; --ref:#b08be8; --dead:#3f4c59;
+  --v0:#b08be8; --v1:#6fbf73; --v2:#5cc8d6; --v3:#e07aa8;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--gap)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--ref);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--ref);color:var(--ref)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--ref);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: desired state on the left (one object in the API server),
+   observed state on the right (ReplicaSets, nodes, pods), and between them
+   a number that is either equal or not. Below: the loops that make it equal.
+   ========================================================================= */
+.stage{display:grid;grid-template-columns:270px 1fr;gap:14px;align-items:stretch}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);
+  display:flex;justify-content:space-between;align-items:center;gap:8px}
+.cap button{padding:2px 8px;font-size:11px;letter-spacing:0;text-transform:none}
+.cap button.hot{border-color:var(--gap);color:var(--gap)}
+
+.spec{font-family:var(--code);font-size:12px;padding:12px 14px;line-height:1.7;flex:1}
+.spec .k{color:var(--ink-faint)} .spec .v{color:var(--ink)}
+.spec .v.flash{background:rgba(232,163,61,.25);border-radius:3px}
+.spec .empty{color:var(--ink-faint);font-family:var(--sans);font-size:13px}
+.gap{border-top:1px solid var(--line);padding:12px 14px;font-family:var(--mono);font-size:12px}
+.gap .big{font-size:22px;font-weight:700;line-height:1.1;margin-bottom:4px}
+.gap.same .big{color:var(--ok)} .gap.diff .big{color:var(--gap)}
+.gap .sub{color:var(--ink-faint);font-size:11px;font-family:var(--code)}
+
+.observed{padding:12px;display:flex;flex-direction:column;gap:12px;flex:1}
+.rsets{display:flex;gap:8px;flex-wrap:wrap;min-height:20px}
+.rs{border:1px solid var(--line);border-radius:var(--r);padding:6px 10px;font-family:var(--code);
+  font-size:11px;background:var(--bg);transition:opacity .3s,border-color .3s}
+.rs .n{color:var(--ink)} .rs .m{color:var(--ink-faint)}
+.rs.zero{opacity:.4}
+.rs i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.rsets .none{color:var(--ink-faint);font-size:12px;font-family:var(--code);padding:6px 0}
+.nodes{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.node{border:1px solid var(--line);border-radius:var(--r);background:var(--bg);min-height:96px;
+  transition:border-color .3s}
+.node.down{border-color:var(--bad);background:rgba(224,108,108,.05)}
+.node .nh{display:flex;justify-content:space-between;font-family:var(--code);font-size:11px;
+  padding:6px 9px;border-bottom:1px solid var(--line);color:var(--ink-dim)}
+.node.down .nh b{color:var(--bad)} .node .nh b{color:var(--ok);font-weight:400}
+.pods{display:flex;flex-wrap:wrap;gap:6px;padding:8px}
+.tray{border:1px dashed var(--line);border-radius:var(--r);min-height:40px}
+.tray .nh{border-bottom:none;color:var(--ink-faint)}
+.pod{width:52px;height:38px;border:1.5px solid;border-radius:4px;display:flex;flex-direction:column;
+  justify-content:center;align-items:center;font-family:var(--code);font-size:10.5px;line-height:1.2;
+  background:var(--panel-2);transition:opacity .3s,border-color .3s,transform .3s;
+  animation:pop .35s ease-out}
+.pod small{font-size:9px;color:var(--ink-faint)}
+.pod.v0{border-color:var(--v0)} .pod.v1{border-color:var(--v1)} .pod.v2{border-color:var(--v2)} .pod.v3{border-color:var(--v3)}
+.pod.Pending{border-style:dashed;color:var(--gap)}
+.pod.Pending small{color:var(--gap)}
+.pod.Terminating{border-color:var(--bad)!important;color:var(--bad);opacity:.55;border-style:dashed}
+.pod.Failed{border-color:var(--bad)!important;background:rgba(224,108,108,.18);color:var(--bad)}
+@keyframes pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
+
+.loops{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}
+.loop{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;
+  min-height:86px;transition:border-color .4s}
+.loop.acted{border-color:var(--gap)}
+.loop .t{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+.loop .t span{float:right;letter-spacing:0;color:var(--ink-faint)}
+.loop .q{font-size:11.5px;color:var(--ink-dim);margin:0 0 6px;font-style:italic}
+.loop .a{font-family:var(--code);font-size:10.5px;color:var(--ink);line-height:1.5}
+.loop .a div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.loop .a .idle{color:var(--ink-faint)}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--ref)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--ok)} .log .mod{color:var(--gap)} .log .err{color:var(--bad)}
+.log .tick{color:var(--ref)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--ref)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:760px){
+  .stage{grid-template-columns:1fr}
+  .loops{grid-template-columns:1fr 1fr}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 01 · Orchestration</p>
+  <h1>Kubernetes never does what you say. It closes a <em>gap</em></h1>
+  <p class="standfirst"><code>kubectl</code> writes a wish into a database. Separately, a
+  handful of loops wake up, compare that wish with what actually exists, and each fix one
+  small difference. Type commands, then <code>tick</code> to let the loops run, and watch
+  the gap close.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap">Desired · the object in the API server</div>
+      <div class="spec" id="spec"></div>
+      <div class="gap" id="gap"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>Observed · what actually exists</span><button id="tickbtn" title="run every controller once">tick ↻ <span id="tickno"></span></button></div>
+      <div class="observed">
+        <div class="rsets" id="rsets"></div>
+        <div class="nodes" id="nodes"></div>
+        <div class="node tray" id="tray"><div class="nh"><span>unscheduled · waiting for a node</span></div><div class="pods"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="loops" id="loops">
+    <div class="loop" data-k="kubelet"><div class="t">Kubelet · node ctrl<span></span></div><p class="q">"Is every pod on my node in the state it should be?"</p><div class="a"></div></div>
+    <div class="loop" data-k="deploy"><div class="t">Deployment ctrl<span></span></div><p class="q">"Does a ReplicaSet exist for this spec, at this size?"</p><div class="a"></div></div>
+    <div class="loop" data-k="rs"><div class="t">ReplicaSet ctrl<span></span></div><p class="q">"Do exactly N pods with my label exist?"</p><div class="a"></div></div>
+    <div class="loop" data-k="sched"><div class="t">Scheduler<span></span></div><p class="q">"Is there a pod with no node? Pick one."</p><div class="a"></div></div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="kubectl command" placeholder="kubectl apply deployment web --replicas=3 --image=web:1.0">
+    </div>
+  </div>
+  <p class="hintbar">Try <code>help</code> · <code>tick 3</code> · <code>kubectl get all</code> ·
+  <code>kubectl scale deployment web --replicas=5</code> · <code>node down node-b</code> · ↑ for history</p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the <a href="../git/three-trees.html">git</a>
+    and <a href="../docker/layers.html">docker</a> sandboxes. The one new idea is that
+    <code>kubectl</code> reducers only edit <code>state.deployment</code>; every other field
+    is touched only by <code>reconcile()</code>, which runs each controller once per tick in
+    a fixed order. Rollouts use maxSurge 1, maxUnavailable 0. There is no etcd, no API
+    latency, no probes — just the loop.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   deployment: the only thing kubectl writes. rsets/pods/nodes: written only by
+   the controllers in reconcile(). That split is the whole point of the page.
+   ========================================================================= */
+function hashStr(str) {
+  let h = 0x811c9dc5;
+  for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, "0");
+}
+function initialState() {
+  return {
+    deployment: null,
+    rsets: {}, pods: {},
+    nodes: { "node-a": { ready: true }, "node-b": { ready: true } },
+    podSeq: 0, revision: 0, tick: 0,
+    images: {},                          /* image → colour index, first-seen order */
+    last: { kubelet: [], deploy: [], rs: [], sched: [] }
+  };
+}
+const clone = s => structuredClone(s);
+const rsNameFor = img => "web-" + hashStr(img).slice(0, 5);
+const podsOf   = (s, rs) => Object.values(s.pods).filter(p => p.rs === rs);
+const active   = (s, rs) => podsOf(s, rs).filter(p => p.phase !== "Terminating" && p.phase !== "Failed");
+const runningOf = (s, rs) => active(s, rs).filter(p => p.phase === "Running");
+const allRunning = s => Object.values(s.pods).filter(p => p.phase === "Running").length;
+const curRS = s => s.deployment ? s.rsets[rsNameFor(s.deployment.image)] : null;
+const seeImage = (n, img) => { if (!(img in n.images)) n.images[img] = Object.keys(n.images).length; };
+
+/* Converged: every pod the spec implies exists, runs, and nothing else does. */
+function converged(s) {
+  const d = s.deployment;
+  if (!d) return !Object.keys(s.rsets).length && !Object.keys(s.pods).length;
+  const rs = curRS(s);
+  if (!rs || rs.replicas !== d.replicas) return false;
+  if (Object.values(s.rsets).some(r => r !== rs && r.replicas > 0)) return false;
+  const pods = Object.values(s.pods);
+  return pods.length === d.replicas && pods.every(p => p.rs === rs.name && p.phase === "Running");
+}
+
+/* ----------------------------------------------------------------------------
+   The loop. One pass of each controller, in a fixed order. Returns what each
+   one did so the log and the strip can show it. Mutates `n` in place.
+   ------------------------------------------------------------------------- */
+function reconcile(n) {
+  const A = { kubelet: [], deploy: [], rs: [], sched: [] };
+  n.tick++;
+
+  /* kubelet: finish transitions started last tick */
+  for (const p of Object.values(n.pods)) {
+    if (p.phase === "Terminating" || p.phase === "Failed") { delete n.pods[p.name]; A.kubelet.push(`gone: ${p.name}`); }
+    else if (p.phase === "Pending" && p.node && n.nodes[p.node].ready) { p.phase = "Running"; A.kubelet.push(`${p.node}: started ${p.name}`); }
+  }
+  /* node controller: pods on a NotReady node are lost */
+  for (const p of Object.values(n.pods))
+    if (p.node && !n.nodes[p.node].ready && p.phase !== "Failed") { p.phase = "Failed"; A.kubelet.push(`${p.node} NotReady → ${p.name} Failed`); }
+
+  /* garbage collector (part of the deployment story): owner gone → children go */
+  for (const rs of Object.values(n.rsets)) {
+    if (n.deployment && rs.owner === n.deployment.name) continue;
+    delete n.rsets[rs.name];
+    A.deploy.push(`GC: owner gone → deleted ${rs.name}`);
+    podsOf(n, rs.name).forEach(p => { if (p.phase !== "Terminating") { p.phase = "Terminating"; A.deploy.push(`GC: orphan → terminating ${p.name}`); } });
+  }
+
+  /* deployment controller */
+  const d = n.deployment;
+  if (d) {
+    const name = rsNameFor(d.image);
+    let cur = n.rsets[name];
+    const maxRev = Math.max(0, ...Object.values(n.rsets).map(r => r.revision));
+    if (!cur) {
+      cur = n.rsets[name] = { name, image: d.image, replicas: 0, owner: d.name, revision: ++n.revision };
+      A.deploy.push(`spec wants ${d.image} → created ReplicaSet ${name}`);
+    } else if (cur.revision < maxRev) {
+      cur.revision = ++n.revision;
+      A.deploy.push(`spec wants ${d.image} again → reusing ${name}`);
+    }
+    const olds = Object.values(n.rsets).filter(r => r.name !== name && r.replicas > 0);
+    const N = d.replicas;
+    if (!olds.length) {
+      if (cur.replicas !== N) { A.deploy.push(`${name}: replicas ${cur.replicas} → ${N}`); cur.replicas = N; }
+    } else {
+      /* rolling update, maxSurge 1 / maxUnavailable 0 */
+      const readyNew = runningOf(n, name).length;
+      const oldSum = olds.reduce((a, r) => a + r.replicas, 0);
+      if (readyNew + oldSum > N) {
+        const old = olds.sort((a, b) => b.revision - a.revision)[0];
+        old.replicas--;
+        A.deploy.push(`rolling: ${readyNew} new ready → ${old.name} ${old.replicas + 1} → ${old.replicas}`);
+      }
+      const total = Object.values(n.rsets).reduce((a, r) => a + r.replicas, 0);
+      if (cur.replicas < N && total < N + 1) { cur.replicas++; A.deploy.push(`rolling: ${name} ${cur.replicas - 1} → ${cur.replicas} (surge)`); }
+      if (cur.replicas === N && Object.values(n.rsets).every(r => r === cur || r.replicas === 0))
+        A.deploy.push(`rollout of ${d.image} complete`);
+    }
+  }
+
+  /* replicaset controller */
+  for (const rs of Object.values(n.rsets)) {
+    const act = active(n, rs.name);
+    if (act.length < rs.replicas) {
+      for (let i = act.length; i < rs.replicas; i++) {
+        const name = `${rs.name}-${++n.podSeq}`;
+        n.pods[name] = { name, rs: rs.name, image: rs.image, node: null, phase: "Pending", born: n.tick };
+        A.rs.push(`${rs.name}: ${act.length}/${rs.replicas} → created ${name}`);
+      }
+    } else if (act.length > rs.replicas) {
+      const victims = [...act].sort((a, b) => (a.node ? 1 : 0) - (b.node ? 1 : 0) || (a.phase === "Running") - (b.phase === "Running") || b.born - a.born)
+        .slice(0, act.length - rs.replicas);
+      victims.forEach(p => { p.phase = "Terminating"; A.rs.push(`${rs.name}: ${act.length}/${rs.replicas} → terminating ${p.name}`); });
+    }
+  }
+
+  /* scheduler */
+  for (const p of Object.values(n.pods).filter(p => p.phase === "Pending" && !p.node)) {
+    const ready = Object.keys(n.nodes).filter(k => n.nodes[k].ready)
+      .sort((a, b) => Object.values(n.pods).filter(x => x.node === a).length - Object.values(n.pods).filter(x => x.node === b).length);
+    if (!ready.length) { A.sched.push(`${p.name}: 0/${Object.keys(n.nodes).length} nodes available`); continue; }
+    p.node = ready[0];
+    A.sched.push(`${p.name} → ${p.node}`);
+  }
+
+  n.last = A;
+  return A;
+}
+
+/* ============================================================================
+   2. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const positional = args => args.filter(a => !a.startsWith("-"));
+const flagVal = (args, name) => { const a = args.find(x => x.startsWith(`--${name}=`)); return a ? a.split("=")[1] : null; };
+const isDeploy = w => /^(deploy|deployment|deployments|deploy\.apps|deployment\.apps)$/.test(w || "");
+
+function gapLine(s) {
+  const d = s.deployment;
+  if (!d) return line(`desired: nothing · observed: ${Object.keys(s.pods).length} pod(s)`, Object.keys(s.pods).length ? "mod" : "dim");
+  const rs = curRS(s), upToDate = rs ? runningOf(s, rs.name).length : 0;
+  const c = converged(s);
+  return line(`${d.replicas} desired · ${allRunning(s)} running · ${upToDate} up-to-date${c ? "  ✓ converged" : "  — gap open"}`, c ? "add" : "mod");
+}
+
+const REGISTRY = {
+
+  "kubectl apply": (s, args) => REGISTRY["kubectl create"](s, args, "apply"),
+  "kubectl create": (s, args, kind) => {
+    const pos = positional(args);
+    if (!isDeploy(pos[0])) return fail("this sandbox knows one kind: kubectl apply deployment <name> --replicas=N --image=IMG");
+    const name = pos[1] || "web";
+    if (name !== "web") return fail("the sandbox is wired for a single deployment named 'web'");
+    const replicas = flagVal(args, "replicas"), image = flagVal(args, "image");
+    const n = clone(s);
+    const existed = !!n.deployment;
+    if (!existed && (!image)) return fail("--image=<img> is required to create the deployment");
+    n.deployment = n.deployment || { name, replicas: 1, image, generation: 0 };
+    if (replicas !== null) n.deployment.replicas = Math.max(0, +replicas | 0);
+    if (image) { n.deployment.image = image; }
+    n.deployment.generation++;
+    seeImage(n, n.deployment.image);
+    const same = JSON.stringify(n.deployment) === JSON.stringify({ ...s.deployment, generation: n.deployment.generation });
+    return { state: n, out: [
+      line(`deployment.apps/${name} ${!existed ? "created" : same ? "unchanged" : "configured"}`, "add"),
+      line("one record written to the API server. No pod started, no controller ran. That's all apply does.", "dim")
+    ] };
+  },
+
+  "kubectl scale": (s, args) => {
+    const pos = positional(args);
+    if (!isDeploy(pos[0]) || !s.deployment) return fail(`Error: deployments.apps "${pos[1] || "web"}" not found`);
+    const r = flagVal(args, "replicas");
+    if (r === null) return fail("usage: kubectl scale deployment web --replicas=N");
+    const n = clone(s); n.deployment.replicas = Math.max(0, +r | 0); n.deployment.generation++;
+    return { state: n, out: [line(`deployment.apps/web scaled`, "add"),
+      line(`spec.replicas is now ${n.deployment.replicas}. The pods don't know yet.`, "dim")] };
+  },
+
+  "kubectl set": (s, args) => {
+    const pos = positional(args);
+    if (pos[0] !== "image" || !isDeploy(pos[1]) || !s.deployment) return fail("usage: kubectl set image deployment web web=<image>");
+    const img = (pos[pos.length - 1] || "").split("=").pop();
+    if (!img || img === "web") return fail("usage: kubectl set image deployment web web=<image>");
+    const n = clone(s); n.deployment.image = img; n.deployment.generation++; seeImage(n, img);
+    return { state: n, out: [line(`deployment.apps/web image updated`, "add"),
+      line(`spec.template.image is now ${img}. Every running pod still has the old one.`, "dim")] };
+  },
+
+  "kubectl rollout": (s, args) => {
+    const pos = positional(args);
+    if (!s.deployment) return fail('Error: deployments.apps "web" not found');
+    if (pos[0] === "status") {
+      const rs = curRS(s), d = s.deployment, up = rs ? runningOf(s, rs.name).length : 0;
+      return { out: converged(s) ? [line(`deployment "web" successfully rolled out`, "add")]
+        : [line(`Waiting for deployment "web" rollout to finish: ${up} of ${d.replicas} updated replicas are available...`, "mod")] };
+    }
+    if (pos[0] === "undo") {
+      const cur = curRS(s);
+      const prev = Object.values(s.rsets).filter(r => r !== cur).sort((a, b) => b.revision - a.revision)[0];
+      if (!prev) return fail("error: no rollout history found for deployment/web");
+      const n = clone(s); n.deployment.image = prev.image; n.deployment.generation++;
+      return { state: n, out: [line(`deployment.apps/web rolled back`, "add"),
+        line(`undo is just "set image ${prev.image}". The old ReplicaSet is still there to be scaled back up.`, "dim")] };
+    }
+    return fail("usage: kubectl rollout status|undo deployment web");
+  },
+
+  "kubectl delete": (s, args) => {
+    const pos = positional(args);
+    const n = clone(s);
+    if (pos[0] === "pod" || pos[0] === "pods" || pos[0] === "po") {
+      const p = n.pods[pos[1]];
+      if (!p) return fail(`Error from server (NotFound): pods "${pos[1] || ""}" not found`);
+      p.phase = "Terminating";
+      return { state: n, out: [line(`pod "${p.name}" deleted`, "mod"),
+        line("the pod is going away. Nothing here restarts it — but its ReplicaSet will notice a number that's wrong.", "dim")] };
+    }
+    if (isDeploy(pos[0])) {
+      if (!n.deployment) return fail('Error from server (NotFound): deployments.apps "web" not found');
+      n.deployment = null;
+      return { state: n, out: [line(`deployment.apps "web" deleted`, "mod"),
+        line("the spec is gone. The ReplicaSet and pods still exist — until the garbage collector notices their owner is missing.", "dim")] };
+    }
+    return fail("usage: kubectl delete pod <name> | kubectl delete deployment web");
+  },
+
+  "kubectl get": (s, args) => {
+    const what = positional(args)[0] || "all";
+    const out = [];
+    const pad = (t, w) => String(t).padEnd(w);
+    if (/^(all|deploy|deployment|deployments)$/.test(what)) {
+      out.push(line("NAME   READY   UP-TO-DATE   AVAILABLE   IMAGE", "dim"));
+      if (s.deployment) { const rs = curRS(s), d = s.deployment;
+        out.push(line(`web    ${pad(allRunning(s) + "/" + d.replicas, 8)}${pad(rs ? runningOf(s, rs.name).length : 0, 13)}${pad(allRunning(s), 12)}${d.image}`, converged(s) ? "add" : "mod")); }
+      else out.push(line("No resources found.", "dim"));
+    }
+    if (/^(all|rs|replicaset|replicasets)$/.test(what)) {
+      out.push(line("NAME        DESIRED   CURRENT   READY   IMAGE      REV", "dim"));
+      const rss = Object.values(s.rsets).sort((a, b) => b.revision - a.revision);
+      if (!rss.length) out.push(line("No resources found.", "dim"));
+      rss.forEach(r => out.push(line(`${pad(r.name, 12)}${pad(r.replicas, 10)}${pad(active(s, r.name).length, 10)}${pad(runningOf(s, r.name).length, 8)}${pad(r.image, 11)}${r.revision}`, r.replicas ? "ok" : "dim")));
+    }
+    if (/^(all|po|pod|pods)$/.test(what)) {
+      out.push(line("NAME            READY   STATUS        NODE     IMAGE", "dim"));
+      const ps = Object.values(s.pods).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+      if (!ps.length) out.push(line("No resources found.", "dim"));
+      ps.forEach(p => out.push(line(`${pad(p.name, 16)}${pad(p.phase === "Running" ? "1/1" : "0/1", 8)}${pad(p.phase, 14)}${pad(p.node || "<none>", 9)}${p.image}`,
+        p.phase === "Running" ? "ok" : p.phase === "Pending" ? "mod" : "err")));
+    }
+    if (/^(all|no|node|nodes)$/.test(what)) {
+      out.push(line("NAME     STATUS     PODS", "dim"));
+      Object.keys(s.nodes).forEach(k => out.push(line(`${pad(k, 9)}${pad(s.nodes[k].ready ? "Ready" : "NotReady", 11)}${Object.values(s.pods).filter(p => p.node === k).length}`, s.nodes[k].ready ? "ok" : "err")));
+    }
+    if (!out.length) return fail(`error: the server doesn't have a resource type "${what}"`);
+    return { out };
+  },
+
+  "tick": (s, args) => {
+    const times = Math.min(30, Math.max(1, +args[0] || 1));
+    const n = clone(s), out = [];
+    for (let t = 0; t < times; t++) {
+      const A = reconcile(n);
+      const acts = [...A.kubelet.map(a => ["kubelet", a]), ...A.deploy.map(a => ["deploy ", a]), ...A.rs.map(a => ["rs     ", a]), ...A.sched.map(a => ["sched  ", a])];
+      out.push(line(`tick ${n.tick}${acts.length ? "" : " — every loop looked, nothing to do"}`, "tick"));
+      acts.forEach(([who, a]) => out.push(line(`  ${who} ${a}`, /Failed|terminating|gone|GC/.test(a) ? "err" : /created|started|→ node|complete|reusing/.test(a) ? "add" : "ok")));
+      if (converged(n) && t < times - 1) { out.push(line("  converged — stopping early", "dim")); break; }
+    }
+    out.push(gapLine(n));
+    return { state: n, out };
+  },
+
+  "node": (s, args) => {
+    const [what, name] = args;
+    if (!/^(down|up)$/.test(what || "") || !s.nodes[name]) return fail("usage: node down|up node-a|node-b");
+    const n = clone(s); n.nodes[name].ready = what === "up";
+    return { state: n, out: [line(`${name} is now ${what === "up" ? "Ready" : "NotReady"}`, what === "up" ? "add" : "err"),
+      line(what === "up" ? "nothing moves back. The scheduler only places pods that have no node."
+                         : `its ${Object.values(s.pods).filter(p => p.node === name).length} pod(s) are still recorded as Running — until the node controller stops hearing from it.`, "dim")] };
+  },
+
+  "help": () => ({ out: [
+    line("kubectl apply deployment web --replicas=N --image=IMG   write the desired state", "ok"),
+    line("kubectl scale deployment web --replicas=N              edit one number", "ok"),
+    line("kubectl set image deployment web web=IMG              edit the image → rolling update", "ok"),
+    line("kubectl rollout status|undo deployment web", "ok"),
+    line("kubectl delete pod <name> · kubectl delete deployment web", "ok"),
+    line("kubectl get all|deploy|rs|pods|nodes", "ok"),
+    line("tick [n]                run every controller once (n times)", "mod"),
+    line("node down|up node-b     break or fix a node", "ok"),
+    line("restart", "dim")
+  ] }),
+
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+REGISTRY["k"] = (s, args, raw) => dispatch(s, "kubectl " + raw.trim().slice(1).trim());
+
+/* ============================================================================
+   3. PARSER
+   ========================================================================= */
+function tokenize(str) { return (str.match(/"[^"]*"|'[^']*'|\S+/g) || []); }
+function dispatch(state, raw) {
+  const tok = tokenize(raw.trim());
+  if (!tok.length) return null;
+  for (const n of [2, 1]) {
+    const key = tok.slice(0, n).join(" ");
+    if (REGISTRY[key]) return REGISTRY[key](state, tok.slice(n).map(t => t.replace(/^["']|["']$/g, "")), raw);
+  }
+  return fail(`${tok[0]}: command not found — try 'help'`);
+}
+
+/* ============================================================================
+   4. RENDERER — HTML joins; the pods are the animation.
+   ========================================================================= */
+let prevSpec = null, prevTick = -1;
+const vcls = (s, img) => "v" + ((s.images[img] ?? 0) % 4);
+const vcol = (s, img) => `var(--${vcls(s, img)})`;
+
+function render(s) {
+  const d = s.deployment;
+
+  /* spec */
+  const spec = d3.select("#spec");
+  if (!d) { spec.html(`<div class="empty">No Deployment object. Desired state is empty — so the correct number of pods is zero.</div>`); }
+  else {
+    spec.selectAll("div.empty").remove();
+    const rows = [["apiVersion", "apps/v1"], ["kind", "Deployment"], ["metadata.name", d.name], ["metadata.generation", d.generation],
+                  ["spec.replicas", d.replicas], ["spec.template.image", d.image]];
+    const r = spec.selectAll("div.row").data(rows, x => x[0]);
+    r.exit().remove();
+    const re = r.enter().append("div").attr("class", "row");
+    re.append("span").attr("class", "k"); re.append("span").attr("class", "v");
+    const rm = re.merge(r).order();
+    rm.select(".k").text(x => x[0] + ": ");
+    rm.select(".v").text(x => x[1]).each(function (x) {
+      if (prevSpec && prevSpec.get(x[0]) !== x[1]) { this.classList.add("flash"); setTimeout(() => this.classList.remove("flash"), 900); }
+    });
+    prevSpec = new Map(rows);
+  }
+  if (!d) prevSpec = null;
+
+  /* gap */
+  const c = converged(s), rs = curRS(s);
+  const g = d3.select("#gap").attr("class", "gap " + (c ? "same" : "diff"));
+  g.html(d
+    ? `<div class="big">${d.replicas} → ${allRunning(s)}</div><div class="sub">desired → running${rs ? ` · ${runningOf(s, rs.name).length} on ${d.image}` : ""}${c ? " · converged" : " · gap open"}</div>`
+    : `<div class="big">0 → ${Object.keys(s.pods).length}</div><div class="sub">desired → existing${c ? " · converged" : " · gap open"}</div>`);
+  d3.select("#tickbtn").classed("hot", !c);
+  d3.select("#tickno").text(`#${s.tick}`);
+
+  /* replicasets */
+  const rss = Object.values(s.rsets).sort((a, b) => b.revision - a.revision);
+  const rj = d3.select("#rsets").selectAll("div.rs").data(rss, r => r.name);
+  rj.exit().remove();
+  const rje = rj.enter().append("div").attr("class", "rs");
+  rje.merge(rj).order().attr("class", r => "rs" + (r.replicas ? "" : " zero"))
+    .html(r => `<i style="background:${vcol(s, r.image)}"></i><span class="n">${r.name}</span> <span class="m">${r.image} · rev ${r.revision}</span><br><span class="m">wants ${r.replicas} · has ${active(s, r.name).length} · running ${runningOf(s, r.name).length}</span>`);
+  d3.select("#rsets").selectAll("div.none").data(rss.length ? [] : [0]).join("div").attr("class", "none")
+    .text("no ReplicaSets — nothing has asked for pods yet");
+
+  /* nodes + pods */
+  const nodes = Object.keys(s.nodes).map(k => ({ name: k, ...s.nodes[k], pods: Object.values(s.pods).filter(p => p.node === k).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })) }));
+  const nj = d3.select("#nodes").selectAll("div.node").data(nodes, n => n.name);
+  const nje = nj.enter().append("div").attr("class", "node");
+  nje.append("div").attr("class", "nh"); nje.append("div").attr("class", "pods");
+  const njm = nje.merge(nj).attr("class", n => "node" + (n.ready ? "" : " down"));
+  njm.select(".nh").html(n => `<span>${n.name}</span><b>${n.ready ? "Ready" : "NotReady"}</b> <span>${n.pods.length} pod(s)</span>`);
+  const podJoin = sel => {
+    const pj = sel.selectAll("div.pod").data(n => n.pods, p => p.name);
+    pj.exit().remove();
+    const pje = pj.enter().append("div").attr("class", "pod");
+    pje.merge(pj).order()
+      .attr("class", p => `pod ${vcls(s, p.image)} ${p.phase}`)
+      .attr("title", p => `${p.name}\n${p.phase} · ${p.image}\nowner: ${p.rs}`)
+      .html(p => `<span>#${p.name.split("-").pop()}</span><small>${p.image.split(":").pop()}</small>`);
+  };
+  podJoin(njm.select(".pods"));
+  const tray = d3.select("#tray").datum({ pods: Object.values(s.pods).filter(p => !p.node) });
+  podJoin(tray.select(".pods"));
+  d3.select("#tray").style("display", Object.values(s.pods).some(p => !p.node) ? null : "none");
+
+  /* loops strip */
+  const acted = s.tick !== prevTick;
+  d3.selectAll("#loops .loop").each(function () {
+    const k = this.dataset.k, acts = s.last[k] || [];
+    d3.select(this).classed("acted", acted && acts.length > 0);
+    d3.select(this).select(".t span").text(s.tick ? `tick #${s.tick}` : "");
+    d3.select(this).select(".a").html(acts.length ? acts.slice(0, 4).map(a => `<div title="${a}">${a}</div>`).join("") + (acts.length > 4 ? `<div class="idle">+${acts.length - 4} more</div>` : "")
+      : `<div class="idle">${s.tick ? "looked, nothing to do" : "hasn't run yet"}</div>`);
+  });
+  prevTick = s.tick;
+}
+
+/* ============================================================================
+   5. LESSON
+   ========================================================================= */
+const dep = s => s.deployment;
+const img = s => s.deployment?.image;
+const podsOn = (s, node) => Object.values(s.pods).filter(p => p.node === node).length;
+
+const LESSON = [
+  { title: "Declare, don't command",
+    body: `This writes one object into the API server: a Deployment that <em>wants</em> three
+    pods running <code>web:1.0</code>. Look at the right side after you run it: nothing.
+    No pod was started. <code>kubectl</code> talked to a database, not to a machine.`,
+    try: "kubectl apply deployment web --replicas=3 --image=web:1.0", expect: /^kubectl (apply|create)/,
+    needs: s => !dep(s) },
+
+  { title: "Tick: the loops wake up",
+    body: `Each controller runs once, in order. The Deployment controller sees a spec with no
+    ReplicaSet and creates one. The ReplicaSet controller sees a ReplicaSet wanting 3 pods and
+    owning 0, and creates 3. The scheduler sees 3 pods with no node and assigns them. Each loop
+    fixed <strong>one kind of difference</strong>, and none of them talked to each other.`,
+    try: "tick", expect: /^tick/,
+    needs: s => dep(s) && !Object.keys(s.rsets).length },
+
+  { title: "Tick again",
+    body: `The kubelets on each node see pods assigned to them that aren't running, and start
+    them. Now desired equals observed and every loop reports nothing to do. Converged — until
+    something changes on either side.`,
+    try: "tick", expect: /^tick/,
+    needs: s => dep(s) && Object.keys(s.pods).length && !converged(s) },
+
+  { title: "Kill a pod",
+    body: `Delete a pod by hand. It goes into Terminating. No alarm fires and nothing restarts
+    it. But on the next tick the ReplicaSet controller will count 2 where it wants 3.`,
+    try: "kubectl delete pod web-3a913-1", expect: /^kubectl delete pod/,
+    needs: s => converged(s) && "web-3a913-1" in s.pods },
+
+  { title: "Tick until it's back",
+    body: `<code>tick 2</code> runs two rounds. Round one: the dead pod is gone, the ReplicaSet
+    controller creates a replacement, the scheduler places it. Round two: the kubelet starts
+    it. Nobody "restarted" anything. A number was wrong and a loop made it right.`,
+    try: "tick 2", expect: /^tick/,
+    needs: s => dep(s) && !converged(s) },
+
+  { title: "Scaling is editing a number",
+    body: `Change <code>spec.replicas</code> from 3 to 5. That is the entire operation. The
+    pods don't know and the ReplicaSet doesn't know. Watch the gap meter go amber.`,
+    try: "kubectl scale deployment web --replicas=5", expect: /^kubectl scale/,
+    needs: s => converged(s) && dep(s).replicas === 3 },
+
+  { title: "Close the gap",
+    body: `Deployment controller: ReplicaSet says 3, spec says 5, set it to 5. ReplicaSet
+    controller: 3 pods, want 5, make 2. Scheduler: 2 pods with no node. Kubelet: start them.
+    The same loops as before, doing the same thing, for a different reason.`,
+    try: "tick 2", expect: /^tick/,
+    needs: s => dep(s) && !converged(s) },
+
+  { title: "A node dies",
+    body: `Take node-b offline. Its pods are still recorded as Running, because the record is
+    in the API server and nobody has updated it yet. Kubernetes doesn't know the node is dead
+    until it stops hearing from it.`,
+    try: "node down node-b", expect: /^node down/,
+    needs: s => converged(s) && s.nodes["node-b"].ready && podsOn(s, "node-b") > 0 },
+
+  { title: "Loops to the rescue",
+    body: `The node controller marks the pods on node-b as Failed. The ReplicaSet controller
+    counts them as missing and creates replacements. The scheduler has only one Ready node to
+    choose from, so they all land on node-a. Self-healing is not a feature; it is the same
+    loop noticing a different gap.`,
+    try: "tick 2", expect: /^tick/,
+    needs: s => !s.nodes["node-b"].ready && (podsOn(s, "node-b") > 0 || !converged(s)) },
+
+  { title: "The node comes back",
+    body: `Bring node-b up and tick. <strong>Nothing moves.</strong> Every pod already has a
+    node, so the scheduler has no work. Kubernetes converges toward the spec, not toward
+    balance; rebalancing needs a separate loop (a descheduler) or a new rollout.`,
+    try: "node up node-b", expect: /^node up/,
+    needs: s => !s.nodes["node-b"].ready && converged(s) },
+
+  { title: "Tick to prove it",
+    body: `Every controller looks and finds nothing to do, even though one node is empty and the
+    other has five pods. The spec says five pods; it says nothing about where.`,
+    try: "tick", expect: /^tick/,
+    needs: s => Object.values(s.nodes).every(n => n.ready) && converged(s) },
+
+  { title: "Rolling update: change the image",
+    body: `Edit <code>spec.template.image</code>. Once again nothing happens yet. But this
+    change can't be met by scaling the existing ReplicaSet, because its pods are the wrong
+    image — so the Deployment controller is about to create a second one.`,
+    try: "kubectl set image deployment web web=web:2.0", expect: /^kubectl set image/,
+    needs: s => converged(s) && img(s) === "web:1.0" },
+
+  { title: "The first step of a rollout",
+    body: `A new ReplicaSet appears for <code>web:2.0</code> with one replica (maxSurge 1), so
+    there are briefly six pods. The old ReplicaSet won't be scaled down until a new pod is
+    actually Running. The rollout is the Deployment controller nudging two numbers a step at
+    a time, and everything below it reacting.`,
+    try: "tick", expect: /^tick/,
+    needs: s => img(s) === "web:2.0" && !curRS(s) },
+
+  { title: "Let it finish",
+    body: `Each tick: one new pod is ready, so one old replica is removed, so one more new one
+    can surge in. Green replaces purple one box at a time. The old ReplicaSet stays behind at
+    zero replicas — that's the rollout history.`,
+    try: "tick 8", expect: /^tick/,
+    needs: s => img(s) === "web:2.0" && !converged(s) },
+
+  { title: "Undo is another spec change",
+    body: `Roll back. All this does is set the image back to <code>web:1.0</code>. The old
+    ReplicaSet gets a new revision number and is scaled back up; the <code>2.0</code> one is
+    scaled down. There is no special "undo" machinery — the same loop runs the same way.`,
+    try: "kubectl rollout undo deployment web", expect: /^kubectl rollout undo/,
+    needs: s => converged(s) && img(s) === "web:2.0" },
+
+  { title: "Roll it back",
+    body: `Purple replaces green, same choreography in reverse.`,
+    try: "tick 8", expect: /^tick/,
+    needs: s => img(s) === "web:1.0" && !converged(s) },
+
+  { title: "Delete the deployment",
+    body: `The spec is gone. The ReplicaSet and its pods are all still there. Nothing kills
+    them directly — but they carry an owner reference to an object that no longer exists.`,
+    try: "kubectl delete deployment web", expect: /^kubectl delete deploy/,
+    needs: s => !!dep(s) },
+
+  { title: "Garbage collection is a loop too",
+    body: `The garbage collector sees children whose owner is gone and deletes them; the
+    kubelets stop the pods. Desired is empty, observed is empty. Converged on nothing.`,
+    try: "tick 2", expect: /^tick/,
+    needs: s => !dep(s) && !converged(s) },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try scaling to zero, deleting pods mid-rollout,
+    or taking a node down during one, and watch the loops sort it out without any of them
+    knowing what you did.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   6. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("tickbtn").onclick = () => run("tick");
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Reconciliation sandbox loaded. Type 'help' for the command list.", "dim");
+</script>
+</body>
+</html>
