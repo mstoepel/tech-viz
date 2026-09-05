@@ -106,9 +106,10 @@ const VIZ = [
     blurb: `A fixed schedule destroys the data; one learned function undoes a step. Sample it
             backwards, skip steps, steer it with guidance, and see why a perfect denoiser
             only memorises.` },
-  { topic: "ml", status: "planned", title: "Post-training",
-    blurb: `Pretrained to SFT to preference tuning: what each stage changes about the same
-            prompt, and why RLHF is a preference signal rather than more facts.` }
+  { topic: "ml", path: "ai/post-training.html", title: "Same weights, different wants",
+    blurb: `One prompt, seven answers, the real update rules. SFT imitates, a reward model
+            learns the labelers' taste, RLHF chases it on a KL leash, and reward hacking
+            shows up as two curves parting.` }
 ];
 
 /* --------------------------------------------------------------------------- */

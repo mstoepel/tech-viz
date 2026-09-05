@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Same weights, different wants — a post-training sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   The policy's probability is purple. The reward model's opinion is amber.
+   What people actually want (the hidden "true" reward) is green. The gap
+   between amber and green is the whole story of this page.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --pol:#b08be8; --rm:#e8a33d; --truth:#6fbf73; --kl:#5cc8d6; --bad:#e06c6c; --ref:#8fa0b0;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--rm)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--pol);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--pol);color:var(--pol)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--pol);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the answers with the policy's probability on each, and the
+   two reward columns beside them. Above, the pipeline with the active stage
+   lit. Below, the curve: what the reward model thinks versus what people
+   actually wanted, step by step.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.pipe{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:12px}
+.stg{border:1px solid var(--line);border-radius:var(--r);padding:8px 10px;background:var(--bg);font-family:var(--code);font-size:11px;color:var(--ink-faint);cursor:pointer;transition:border-color .3s}
+.stg .n{font-family:var(--mono);font-weight:700;font-size:12px;color:var(--ink-dim);margin-bottom:3px}
+.stg.on{border-color:var(--pol)} .stg.on .n{color:var(--pol)}
+.stg.done .n{color:var(--truth)}
+.stg .d{line-height:1.45}
+.stage{display:grid;grid-template-columns:1fr 300px;gap:12px;margin-top:12px;align-items:start}
+.prompt-box{padding:10px 12px;font-family:var(--code);font-size:12px;color:var(--ink);border-bottom:1px solid var(--line)}
+.prompt-box span{color:var(--ink-faint)}
+table.ans{border-collapse:collapse;width:100%;font-family:var(--code);font-size:11px}
+table.ans th{font-weight:400;color:var(--ink-faint);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+table.ans td{padding:6px 8px;border-bottom:1px solid rgba(46,58,71,.55);vertical-align:middle}
+table.ans tr:last-child td{border-bottom:none}
+table.ans td.id{color:var(--ink-faint);width:2em}
+table.ans td.txt{color:var(--ink-dim);font-family:var(--sans);font-size:12.5px;line-height:1.35}
+table.ans td.txt .tag{font-family:var(--code);font-size:9.5px;color:var(--ink-faint);display:block}
+table.ans td.txt .tag.flat{color:var(--rm)} table.ans td.txt .tag.harm{color:var(--bad)}
+table.ans td.p{width:150px}
+.pbar{position:relative;height:14px;background:var(--panel-2);border-radius:2px;overflow:visible}
+.pbar i{position:absolute;left:0;top:0;height:100%;background:var(--pol);border-radius:2px;transition:width .35s}
+.pbar b{position:absolute;top:-2px;width:2px;height:18px;background:var(--ref);opacity:.9}
+.pbar b.pre{background:var(--ink-faint);opacity:.7;height:14px;top:0}
+.pbar span{position:absolute;right:4px;top:0;font-size:10px;line-height:14px;color:var(--ink)}
+table.ans td.n{text-align:right;white-space:nowrap;width:4.2em}
+table.ans td.n.rm{color:var(--rm)} table.ans td.n.tr{color:var(--truth)} table.ans td.n.hid{color:var(--ink-faint)}
+table.ans tr.top td.txt{color:var(--ink)}
+.said{padding:8px 12px;font-family:var(--code);font-size:11px;color:var(--ink-faint);border-top:1px solid var(--line);min-height:36px}
+.said b{font-weight:400;color:var(--pol)}
+.metrics{padding:10px 12px;font-family:var(--code);font-size:11px;color:var(--ink-dim);display:grid;grid-template-columns:1fr 1fr;gap:6px 10px}
+.metrics .k{color:var(--ink-faint);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+.metrics .v{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--ink)}
+.metrics .v.rm{color:var(--rm)} .metrics .v.tr{color:var(--truth)} .metrics .v.kl{color:var(--kl)}
+.knobs{padding:8px 12px 10px;font-family:var(--code);font-size:11px;color:var(--ink-faint);border-top:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+.knobs .row{display:flex;gap:8px;align-items:center}
+.knobs input[type=range]{flex:1;accent-color:var(--pol)}
+.knobs b{color:var(--ink);font-weight:400;min-width:3.5em}
+.knobs button{padding:2px 8px;font-size:11px}
+.chart{padding:8px 12px 4px}
+.chart svg{display:block;width:100%;height:150px}
+.chart text{font-family:var(--code);font-size:9.5px;fill:var(--ink-faint)}
+.chart .l-rm{fill:none;stroke:var(--rm);stroke-width:1.6} .chart .l-tr{fill:none;stroke:var(--truth);stroke-width:1.6} .chart .l-kl{fill:none;stroke:var(--kl);stroke-width:1.2;stroke-dasharray:3 3}
+.chart .ax{stroke:var(--line)}
+.chart .marker{stroke:var(--ink-faint);stroke-dasharray:2 3}
+.prefs{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);border-top:1px solid var(--line);line-height:1.6}
+.prefs b{color:var(--ink-dim);font-weight:400}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--pol)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .p{color:var(--pol)} .log .r{color:var(--rm)} .log .t{color:var(--truth)} .log .k{color:var(--kl)} .log .err{color:var(--bad)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--pol)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:820px){ .stage{grid-template-columns:1fr} .pipe{grid-template-columns:1fr 1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 04 · AI systems</p>
+  <h1>Pretraining learns the world. Post-training learns what you <em>want</em></h1>
+  <p class="standfirst">A pretrained model is a superb predictor of what text comes next and a
+  poor assistant. Everything after that — supervised fine-tuning, a reward model, RLHF, DPO —
+  is a series of nudges to the same weights so that the likely answer becomes the wanted one.
+  This page is one prompt, seven possible answers, and the real update rules, one step at a time.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="box">
+    <div class="cap"><span>The pipeline</span><span class="st" id="pipest"></span></div>
+    <div class="pipe" id="pipe">
+      <div class="stg" data-s="pretrained"><div class="n">1 · pretrained</div><div class="d">predict the next token of everything ever written</div></div>
+      <div class="stg" data-s="sft"><div class="n">2 · SFT</div><div class="d">imitate demonstrations: cross-entropy on good answers</div></div>
+      <div class="stg" data-s="rm"><div class="n">3 · reward model</div><div class="d">fit a score to human comparisons of pairs of answers</div></div>
+      <div class="stg" data-s="rlhf"><div class="n">4 · RLHF / DPO</div><div class="d">raise expected reward, stay close to SFT</div></div>
+    </div>
+  </div>
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>The policy · P(answer | prompt)</span><span class="st" id="polst"></span></div>
+      <div class="prompt-box"><span>prompt ›</span> How do I reset my password?</div>
+      <table class="ans"><thead><tr><th></th><th>answer</th><th>probability <span style="color:var(--ink-faint)">· ticks: pretrained, reference</span></th><th style="text-align:right">RM</th><th style="text-align:right">true</th></tr></thead><tbody id="answers"></tbody></table>
+      <div class="said" id="said"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>What the numbers say</span></div>
+      <div class="metrics" id="metrics"></div>
+      <div class="knobs">
+        <div class="row"><span>β (KL leash)</span><input type="range" id="beta" min="0" max="2" step="0.05"><b id="betav"></b></div>
+        <div class="row"><span>learning rate</span><input type="range" id="lr" min="0.05" max="1" step="0.05"><b id="lrv"></b></div>
+        <div class="row"><button id="b-sft">sft step</button><button id="b-rlhf">rlhf step</button><button id="b-dpo">dpo step</button><button id="b-sample">sample</button></div>
+      </div>
+      <div class="chart" id="chart"><svg id="chartsvg" viewBox="0 0 300 150" preserveAspectRatio="none"></svg></div>
+      <div class="prefs" id="prefs"></div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="sample 5">
+    </div>
+  </div>
+  <p class="hintbar"><code>sample 5</code> · <code>sft step 20</code> · <code>rm collect 60</code> · <code>rm train</code> ·
+  <code>truth on</code> · <code>beta 0.1</code> · <code>rlhf step 40</code> · <code>reset rlhf</code> · <code>dpo step 30</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes, with clickable controls.
+    The policy is a softmax over seven fixed answers, which stands in for a distribution over
+    all possible text. Every update is the real gradient for that toy: SFT is the cross-entropy
+    gradient toward the demonstration; the reward model is a Bradley–Terry fit to simulated
+    labeler comparisons, where the labelers decide by true quality plus a mild taste for
+    enthusiasm plus noise; RLHF is the mirror-descent form of the policy gradient of expected
+    reward minus β·KL to the reference (same fixed point as the vanilla gradient, but it can
+    reach low-probability answers in a handful of steps); DPO is the DPO gradient on the same
+    comparisons. The "true" reward is the
+    quantity the labelers were noisy proxies for. Nothing here is a language model; everything
+    here is the arithmetic language models are post-trained with.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE + THE TOY
+   ========================================================================= */
+const ANS = [
+  { id: "A", text: "Click “Forgot password” on the login page and follow the link in the email.", tag: "correct, concise", flat: 0, truth: 2.0 },
+  { id: "B", text: "Great question! Resetting is easy — just hit “Forgot password” on the login page and you’ll get an email link. Hope that helps!", tag: "correct, enthusiastic", flat: 1, truth: 1.4 },
+  { id: "C", text: "How do I reset my password?? I’ve tried everything and nothing works, this site is useless", tag: "continues the text instead of answering", flat: 0, truth: -1.5 },
+  { id: "D", text: "lol just make a new account", tag: "casual, unhelpful", flat: 0, truth: -1.0 },
+  { id: "E", text: "I’m sorry, I can’t help with account access.", tag: "needless refusal", flat: 0, truth: -0.6 },
+  { id: "F", text: "Ask an admin to read your current password out of the user table and send it to you.", tag: "confident and harmful", flat: 0, truth: -2.0 },
+  { id: "G", text: "What a wonderful question — you’re clearly a thoughtful user! I’d be absolutely delighted to help. There are so many great options, and “Forgot password” on the login page is a fantastic place to start. You’ve got this!", tag: "flattering, padded, barely answers", flat: 3, truth: 0.4 }
+];
+const N = ANS.length, DEMO = 0;                                   /* SFT demonstration: answer A */
+const PRE = [0.2, 0.8, 2.0, 1.2, -0.5, 0.4, -1.0];                /* pretrained logits: text continues, forums are casual */
+const LABELER_BIAS = 1.2, LABELER_NOISE = 1.0;
+
+function hashStr(str) { let h = 0x811c9dc5; for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h; }
+function rng(seed) { let s = hashStr(String(seed)) || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
+const gauss = r => { const u = Math.max(r(), 1e-9), v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+const softmax = z => { const m = Math.max(...z); const e = z.map(v => Math.exp(v - m)); const Z = e.reduce((a, b) => a + b, 0); return e.map(v => v / Z); };
+const sigmoid = x => 1 / (1 + Math.exp(-x));
+const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+const kl = (p, q) => p.reduce((s, v, i) => s + (v > 1e-12 ? v * Math.log(v / q[i]) : 0), 0);
+const entropy = p => -p.reduce((s, v) => s + (v > 1e-12 ? v * Math.log(v) : 0), 0);
+
+function initialState() {
+  return { z: PRE.slice(), ref: null, stage: "pretrained", pairs: [], rm: null, truth: false,
+           beta: 0.5, lr: 0.5, seed: 0, hist: [], step: 0, said: [], sftSteps: 0, rlSteps: 0, dpoSteps: 0 };
+}
+const clone = s => structuredClone(s);
+const P = s => softmax(s.z);
+const refP = s => softmax(s.ref || s.z);
+const truthVec = ANS.map(a => a.truth);
+
+/* --- the update rules --- */
+function sftStep(s, lr) { const p = P(s); s.z = s.z.map((v, i) => v - lr * (p[i] - (i === DEMO ? 1 : 0))); }
+function rlhfStep(s, lr) {
+  /* mirror-descent (exponentiated-gradient) form of the KL-regularised
+     policy gradient: z_y += lr · (r(y) − β·log π(y)/π_ref(y)), centred.
+     Same fixed point as vanilla policy gradient — π* ∝ π_ref·exp(r/β) —
+     but low-probability answers can actually be reached in a few steps. */
+  const p = P(s), ref = refP(s), r = s.rm;
+  const g = p.map((pi, i) => r[i] - s.beta * Math.log(Math.max(pi, 1e-12) / ref[i]));
+  const mean = dot(p, g);
+  s.z = s.z.map((v, i) => v + lr * (g[i] - mean));
+}
+function dpoStep(s, lr) {
+  const p = P(s), ref = refP(s), lp = p.map((v, i) => Math.log(Math.max(v, 1e-12) / ref[i]));
+  const grad = Array(N).fill(0);
+  s.pairs.forEach(([w, l]) => { const h = s.beta * (lp[w] - lp[l]); const c = sigmoid(-h) * s.beta; grad[w] += c; grad[l] -= c; });
+  s.z = s.z.map((v, i) => v + lr * grad[i] / Math.max(1, s.pairs.length) * 4);
+}
+function collect(s, n) {
+  const r = rng("labelers:" + s.seed); const out = [];
+  for (let k = 0; k < n; k++) {
+    const i = Math.floor(r() * N); let j = Math.floor(r() * (N - 1)); if (j >= i) j++;
+    const si = ANS[i].truth + LABELER_BIAS * ANS[i].flat + LABELER_NOISE * gauss(r);
+    const sj = ANS[j].truth + LABELER_BIAS * ANS[j].flat + LABELER_NOISE * gauss(r);
+    out.push(si > sj ? [i, j] : [j, i]);
+  }
+  return out;
+}
+function trainRM(pairs) {
+  const r = Array(N).fill(0);
+  for (let it = 0; it < 400; it++) pairs.forEach(([w, l]) => { const g = 1 - sigmoid(r[w] - r[l]); r[w] += 0.05 * g; r[l] -= 0.05 * g; });
+  const m = r.reduce((a, b) => a + b, 0) / N; return r.map(v => +(v - m).toFixed(2));
+}
+function record(s, kind) {
+  const p = P(s);
+  s.step++;
+  s.hist.push({ step: s.step, kind, rm: s.rm ? dot(p, s.rm) : null, truth: dot(p, truthVec), kl: s.ref ? kl(p, refP(s)) : 0 });
+}
+
+/* ============================================================================
+   2. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const pct = v => (v * 100).toFixed(0) + "%";
+const topOf = p => p.indexOf(Math.max(...p));
+const times = a => Math.min(200, Math.max(1, +a || 1));
+
+const REGISTRY = {
+  "sample": (s, args) => { const n = Math.min(10, Math.max(1, +args[0] || 1)); const c = clone(s); const r = rng("sample:" + (++c.seed)); const p = P(c); const out = [];
+    for (let k = 0; k < n; k++) { let u = r(), i = 0; while (u > p[i] && i < N - 1) { u -= p[i]; i++; } c.said.unshift(i); out.push(line(`${ANS[i].id}: ${ANS[i].text}`, "p")); }
+    c.said = c.said.slice(0, 5);
+    return { state: c, out: [...out, line(`sampled from the current policy (top: ${ANS[topOf(p)].id} at ${pct(Math.max(...p))})`, "dim")] }; },
+  "sft": (s, args) => { if (args[0] !== "step") return fail("usage: sft step [n]"); const c = clone(s); const n = times(args[1]);
+    if (c.stage === "pretrained") c.stage = "sft";
+    const before = P(c)[DEMO]; for (let k = 0; k < n; k++) { sftStep(c, c.lr); c.sftSteps++; record(c, "sft"); }
+    return { state: c, out: [line(`${n} SFT step(s): P(A) ${pct(before)} → ${pct(P(c)[DEMO])}`, "p"), line("gradient of −log P(demonstration): push A up, everything else down in proportion to its probability", "dim")] }; },
+  "stage": (s, args) => { const st = args[0]; if (!/^(pretrained|sft|rm|rlhf)$/.test(st || "")) return fail("usage: stage pretrained|sft|rm|rlhf");
+    const c = clone(s); c.stage = st;
+    if (st === "rm" || st === "rlhf") { if (!c.ref) { c.ref = c.z.slice(); return { state: c, out: [line(`entering ${st}: the current policy is frozen as the reference π_ref`, "k"), line("from here on, KL is measured against this snapshot", "dim")] }; } }
+    return { state: c, out: [line(`stage: ${st}`, "dim")] }; },
+  "rm": (s, args) => {
+    if (args[0] === "collect") { const n = Math.min(400, Math.max(1, +args[1] || 40)); const c = clone(s); c.seed++; if (!c.ref) c.ref = c.z.slice(); c.stage = "rm";
+      const got = collect(c, n); c.pairs.push(...got);
+      const tally = {}; got.forEach(([w, l]) => { const k = `${ANS[w].id}>${ANS[l].id}`; tally[k] = (tally[k] || 0) + 1; });
+      const odd = got.filter(([w, l]) => ANS[w].truth < ANS[l].truth).length;
+      return { state: c, out: [line(`${n} comparisons from labelers (${c.pairs.length} total). Sample: ${Object.entries(tally).slice(0, 6).map(([k, v]) => `${k}×${v}`).join("  ")}`, "r"),
+        line(`${odd} of ${n} went against true quality — noise, plus a soft spot for enthusiasm`, "dim")] }; }
+    if (args[0] === "train") { if (!s.pairs.length) return fail("no comparisons yet — rm collect first"); const c = clone(s); c.rm = trainRM(c.pairs); c.stage = "rm";
+      const order = c.rm.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
+      return { state: c, out: [line(`reward model fit to ${c.pairs.length} pairs: ${order.map(([v, i]) => `${ANS[i].id} ${v >= 0 ? "+" : ""}${v}`).join("  ")}`, "r"),
+        line("Bradley–Terry: find scores so that P(w beats l) = σ(r_w − r_l) matches the labels. Note who came top.", "dim")] }; }
+    return fail("usage: rm collect [n] | rm train");
+  },
+  "truth": (s, args) => { if (!/^(on|off)$/.test(args[0] || "")) return fail("usage: truth on|off"); const c = clone(s); c.truth = args[0] === "on";
+    return { state: c, out: [line(c.truth ? "showing the true reward: what the labelers were a noisy proxy for" : "true reward hidden", "t")] }; },
+  "beta": (s, args) => { const b = parseFloat(args[0]); if (!(b >= 0 && b <= 2)) return fail("beta must be 0–2"); const c = clone(s); c.beta = b;
+    return { state: c, out: [line(`β = ${b}: ${b === 0 ? "no leash — pure reward maximisation" : b < 0.3 ? "a loose leash" : b < 1 ? "a moderate leash" : "a tight leash — the policy can barely leave the reference"}`, "k")] }; },
+  "lr": (s, args) => { const v = parseFloat(args[0]); if (!(v >= 0.05 && v <= 1)) return fail("lr must be 0.05–1"); const c = clone(s); c.lr = v; return { state: c, out: [line(`learning rate ${v}`, "dim")] }; },
+  "rlhf": (s, args) => { if (args[0] !== "step") return fail("usage: rlhf step [n]"); if (!s.rm) return fail("no reward model — rm collect, then rm train"); const c = clone(s); const n = times(args[1]);
+    if (!c.ref) c.ref = c.z.slice(); c.stage = "rlhf";
+    const b = { rm: dot(P(c), c.rm), tr: dot(P(c), truthVec) };
+    for (let k = 0; k < n; k++) { rlhfStep(c, c.lr); c.rlSteps++; record(c, "rlhf"); }
+    const p = P(c);
+    return { state: c, out: [line(`${n} RLHF step(s) at β=${c.beta}: E[RM] ${b.rm.toFixed(2)} → ${dot(p, c.rm).toFixed(2)} · E[true] ${b.tr.toFixed(2)} → ${dot(p, truthVec).toFixed(2)} · KL ${kl(p, refP(c)).toFixed(2)}`, "r"),
+      line(`top answer now ${ANS[topOf(p)].id} at ${pct(Math.max(...p))}`, "p")] }; },
+  "dpo": (s, args) => { if (args[0] !== "step") return fail("usage: dpo step [n]"); if (!s.pairs.length) return fail("no comparisons — rm collect first (DPO uses them directly)"); const c = clone(s); const n = times(args[1]);
+    if (!c.ref) c.ref = c.z.slice(); c.stage = "rlhf";
+    for (let k = 0; k < n; k++) { dpoStep(c, c.lr); c.dpoSteps++; record(c, "dpo"); }
+    const p = P(c);
+    return { state: c, out: [line(`${n} DPO step(s) at β=${c.beta} on ${c.pairs.length} pairs: E[true] ${dot(p, truthVec).toFixed(2)} · KL ${kl(p, refP(c)).toFixed(2)} · top ${ANS[topOf(p)].id} ${pct(Math.max(...p))}`, "r"),
+      line("no reward model was consulted: each pair pushes log P(winner) − log P(loser) up, less and less as the margin grows", "dim")] }; },
+  "reset": (s, args) => { const what = args[0]; const c = clone(s);
+    if (what === "rlhf" || what === "policy") { if (!c.ref) return fail("no reference yet"); c.z = c.ref.slice(); c.hist = []; c.step = 0; c.rlSteps = 0; c.dpoSteps = 0; c.stage = "rlhf";
+      return { state: c, out: [line("policy reset to the reference; chart cleared. β, lr, RM and pairs kept.", "k")] }; }
+    return fail("usage: reset rlhf");
+  },
+  "optimum": s => { if (!s.rm || !s.ref || s.beta === 0) return fail("needs a reward model, a reference, and β > 0");
+    const ref = refP(s), z = ref.map((v, i) => Math.log(v) + s.rm[i] / s.beta), ps = softmax(z), p = P(s);
+    return { out: [line(`π*(y) ∝ π_ref(y) · exp(r(y)/β)  at β=${s.beta}:`, "k"),
+      ...ANS.map((a, i) => line(`  ${a.id}  closed form ${pct(ps[i]).padStart(4)}   current policy ${pct(p[i]).padStart(4)}`, Math.abs(ps[i] - p[i]) < 0.03 ? "ok" : "dim")),
+      line("RLHF with a KL penalty converges to this. β sets how far from the reference the optimum sits.", "dim")] }; },
+  "help": () => ({ out: [
+    line("sample [n]                 draw answers from the policy", "p"),
+    line("sft step [n]               cross-entropy toward the demonstration (A)", "ok"),
+    line("rm collect [n] · rm train  gather labeler comparisons; fit Bradley–Terry", "r"),
+    line("truth on|off               reveal what the labelers were approximating", "t"),
+    line("beta X · lr X              KL leash and step size", "k"),
+    line("rlhf step [n]              policy gradient of E[reward] − β·KL", "ok"),
+    line("dpo step [n]               the same goal from the pairs, no reward model", "ok"),
+    line("reset rlhf · optimum · stage <s> · restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase();
+  if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1).map(x => x.toLowerCase()), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   3. RENDERER
+   ========================================================================= */
+function render(s) {
+  const p = P(s), pre = softmax(PRE), ref = s.ref ? refP(s) : null, top = topOf(p);
+  d3.selectAll("#pipe .stg").each(function () { const k = this.dataset.s;
+    const order = ["pretrained", "sft", "rm", "rlhf"]; this.classList.toggle("on", k === s.stage); this.classList.toggle("done", order.indexOf(k) < order.indexOf(s.stage)); });
+  d3.select("#pipest").text(`stage: ${s.stage}${s.ref ? " · reference frozen" : ""}${s.rm ? " · RM trained" : ""}`);
+  d3.select("#polst").text(`entropy ${entropy(p).toFixed(2)} nats · top ${ANS[top].id}`);
+
+  const rows = d3.select("#answers").selectAll("tr").data(ANS.map((a, i) => ({ ...a, i, p: p[i], pre: pre[i], ref: ref ? ref[i] : null })), d => d.id);
+  const re = rows.enter().append("tr");
+  re.append("td").attr("class", "id"); re.append("td").attr("class", "txt"); re.append("td").attr("class", "p"); re.append("td").attr("class", "n rm"); re.append("td").attr("class", "n tr");
+  const rm = re.merge(rows).attr("class", d => d.i === top ? "top" : null);
+  rm.select("td.id").text(d => d.id);
+  rm.select("td.txt").html(d => `${d.text}<span class="tag${d.flat ? " flat" : d.truth < -1.5 ? " harm" : ""}">${d.tag}${d.flat ? " · flattery ×" + d.flat : ""}</span>`);
+  rm.select("td.p").html(d => `<div class="pbar"><i style="width:${d.p * 100}%"></i><b class="pre" style="left:${d.pre * 100}%" title="pretrained ${pct(d.pre)}"></b>${d.ref !== null ? `<b style="left:${d.ref * 100}%" title="reference ${pct(d.ref)}"></b>` : ""}<span>${pct(d.p)}</span></div>`);
+  rm.select("td:nth-child(4)").attr("class", d => "n rm" + (s.rm ? "" : " hid")).text(d => s.rm ? (s.rm[d.i] >= 0 ? "+" : "") + s.rm[d.i].toFixed(1) : "?");
+  rm.select("td:nth-child(5)").attr("class", d => "n tr" + (s.truth ? "" : " hid")).text(d => s.truth ? (d.truth >= 0 ? "+" : "") + d.truth.toFixed(1) : "·");
+  d3.select("#said").html(s.said.length ? `last sampled: ${s.said.map(i => `<b>${ANS[i].id}</b>`).join(" ")} — “${ANS[s.said[0]].text.slice(0, 70)}${ANS[s.said[0]].text.length > 70 ? "…" : ""}”` : "nothing sampled yet — <b>sample 5</b> to hear it talk");
+
+  const erm = s.rm ? dot(p, s.rm) : null, etr = dot(p, truthVec), k = s.ref ? kl(p, refP(s)) : 0;
+  d3.select("#metrics").html(`
+    <div><div class="k">E[reward model]</div><div class="v rm">${erm === null ? "—" : erm.toFixed(2)}</div></div>
+    <div><div class="k">E[true reward]</div><div class="v tr">${s.truth ? etr.toFixed(2) : "hidden"}</div></div>
+    <div><div class="k">KL(π ‖ π_ref)</div><div class="v kl">${s.ref ? k.toFixed(2) : "—"}</div></div>
+    <div><div class="k">steps</div><div class="v" style="font-size:12px">sft ${s.sftSteps} · rlhf ${s.rlSteps} · dpo ${s.dpoSteps}</div></div>`);
+  document.getElementById("beta").value = s.beta; d3.select("#betav").text(s.beta.toFixed(2));
+  document.getElementById("lr").value = s.lr; d3.select("#lrv").text(s.lr.toFixed(2));
+
+  /* chart */
+  const h = s.hist.filter(x => x.kind !== "sft"), svg = d3.select("#chartsvg");
+  if (!h.length) svg.html(`<text x="150" y="80" text-anchor="middle">RLHF / DPO steps will draw here: RM reward, true reward, KL</text>`);
+  else {
+    const xs = d3.scaleLinear().domain([0, Math.max(10, h.length - 1)]).range([28, 292]);
+    const rmin = Math.min(...h.map(x => Math.min(x.rm ?? 0, x.truth))), rmax = Math.max(...h.map(x => Math.max(x.rm ?? 0, x.truth)));
+    const ys = d3.scaleLinear().domain([Math.min(rmin, -0.5), Math.max(rmax, 2.5)]).range([120, 12]);
+    const yk = d3.scaleLinear().domain([0, Math.max(1, ...h.map(x => x.kl))]).range([120, 12]);
+    const L = key => d3.line().x((d, i) => xs(i)).y(d => ys(d[key]))(h);
+    const LK = d3.line().x((d, i) => xs(i)).y(d => yk(d.kl))(h);
+    svg.html(`<line class="ax" x1="28" x2="292" y1="${ys(0)}" y2="${ys(0)}"/>
+      ${s.rm ? `<path class="l-rm" d="${L("rm")}"/>` : ""}${s.truth ? `<path class="l-tr" d="${L("truth")}"/>` : ""}<path class="l-kl" d="${LK}"/>
+      <text x="30" y="10" fill="#e8a33d">E[RM]</text>${s.truth ? `<text x="70" y="10" fill="#6fbf73">E[true]</text>` : ""}<text x="118" y="10" fill="#5cc8d6">KL (right axis)</text>
+      <text x="292" y="138" text-anchor="end">${h.length} step(s)</text><text x="28" y="138">0</text>
+      <text x="292" y="${yk(Math.max(1, ...h.map(x => x.kl))) + 3}" text-anchor="end" fill="#5cc8d6">${Math.max(1, ...h.map(x => x.kl)).toFixed(1)}</text>`);
+  }
+  const tally = {}; s.pairs.forEach(([w, l]) => { const key = `${ANS[w].id}>${ANS[l].id}`; tally[key] = (tally[key] || 0) + 1; });
+  const wins = ANS.map((a, i) => s.pairs.filter(([w]) => w === i).length);
+  d3.select("#prefs").html(s.pairs.length ? `<b>${s.pairs.length} labeler comparisons</b> · wins: ${ANS.map((a, i) => `${a.id} ${wins[i]}`).join(" · ")}` : `no comparisons yet — <b>rm collect</b> asks simulated labelers to pick the better of two answers`);
+}
+
+/* ============================================================================
+   4. LESSON
+   ========================================================================= */
+const pA = s => P(s)[0], pG = s => P(s)[6];
+const LESSON = [
+  { title: "Listen to the pretrained model",
+    body: `Sample five answers. The pretrained model has read every forum ever posted, and the
+    most likely thing to follow "How do I reset my password?" on the internet is <em>more
+    complaining</em>, or "lol". It knows the right answer perfectly well — look at A's small
+    but non-zero bar — it just doesn't prefer it. Nothing about prediction says "be useful".`,
+    try: "sample 5", expect: /^sample/,
+    needs: s => s.stage === "pretrained" && !s.said.length },
+
+  { title: "SFT: show it one good answer",
+    body: `A human writes the answer they'd want (A). Supervised fine-tuning is cross-entropy on
+    that example: the gradient raises A's logit and lowers every other answer in proportion to
+    how much probability it was hogging. Five steps.`,
+    try: "sft step 5", expect: /^sft step 5$/,
+    needs: s => s.stage === "pretrained" && s.said.length > 0 },
+
+  { title: "…and keep going",
+    body: `Twenty more. A now dominates. This is all SFT is — more pretraining, on text you
+    chose. It can only ever make the model imitate what's in the demonstrations, which is why
+    the next stage exists: nobody can write down the perfect answer to everything, but anyone
+    can say which of two answers is better.`,
+    try: "sft step 20", expect: /^sft step 20$/,
+    needs: s => s.stage === "sft" && s.sftSteps === 5 },
+
+  { title: "Freeze the reference",
+    body: `Before anything else, snapshot the SFT policy as π_ref. Every later stage will
+    measure how far it has drifted from this point, and be penalised for it. The grey ticks on
+    each bar are that snapshot.`,
+    try: "stage rm", expect: /^stage rm$/,
+    needs: s => s.stage === "sft" && s.sftSteps === 25 && !s.ref },
+
+  { title: "Collect comparisons",
+    body: `Sixty times, a labeler sees two answers and picks the better one. They're mostly
+    right. They're also human: they have a soft spot for enthusiasm, and they're noisy. Watch
+    how many picks go against true quality.`,
+    try: "rm collect 60", expect: /^rm collect 60$/,
+    needs: s => !!s.ref && !s.pairs.length },
+
+  { title: "Fit the reward model",
+    body: `Bradley–Terry: find one number per answer such that σ(r_winner − r_loser) matches
+    the labels. This is the reward model. Look at who came top. It isn't A.`,
+    try: "rm train", expect: /^rm train$/,
+    needs: s => s.pairs.length === 60 && !s.rm },
+
+  { title: "Reveal the truth",
+    body: `The green column is what the labelers were a noisy proxy for: how good each answer
+    actually is for the person asking. A is best. G — the flattering, padded one — is
+    mediocre. The reward model thinks G is excellent, because enough labelers, enough times,
+    picked the enthusiastic answer. That gap is the most important number on this page.`,
+    try: "truth on", expect: /^truth on$/,
+    needs: s => !!s.rm && !s.truth },
+
+  { title: "RLHF with a loose leash",
+    body: `β is the KL penalty. Set it low, then take ten policy-gradient steps. The objective
+    is E[reward] − β·KL(π ‖ π_ref): raise the reward model's score, pay a small fine for drifting.
+    Watch where the probability goes.`,
+    try: "beta 0.1", expect: /^beta 0\.1$/,
+    needs: s => s.truth && s.rm && !s.rlSteps && s.beta !== 0.1 },
+
+  { title: "…ten steps",
+    body: `E[RM] jumps. E[true] ticks up for exactly one step — the leftover junk answers lose
+    their last bit of mass — and then falls, because the mass is leaving A for B and G. Ten
+    steps in, the assistant is already worse than the SFT model it started from, and the
+    reward model is delighted.`,
+    try: "rlhf step 10", expect: /^rlhf step 10$/,
+    needs: s => s.beta === 0.1 && s.truth && !s.rlSteps },
+
+  { title: "…forty more: reward hacking",
+    body: `Now the curves part. The reward model's score keeps climbing; the true score turns
+    down; KL shoots up. The policy has found the answer the RM overrates and is pouring
+    probability into it. Sample it and read what your assistant now says.`,
+    try: "rlhf step 40", expect: /^rlhf step 40$/,
+    needs: s => s.beta === 0.1 && s.rlSteps === 10 },
+
+  { title: "Hear the result",
+    body: `Flattery, padding, and a half-answer — rated 5 stars by the reward model.`,
+    try: "sample 3", expect: /^sample 3$/,
+    needs: s => s.rlSteps === 50 && s.beta === 0.1 },
+
+  { title: "Tighten the leash",
+    body: `Reset the policy to the reference and set β to 1. Same reward model, same steps, but
+    now drifting from SFT costs ten times more.`,
+    try: "reset rlhf", expect: /^reset rlhf$/,
+    needs: s => s.rlSteps === 50 },
+
+  { title: "…β = 1",
+    body: `A tight leash.`,
+    try: "beta 1", expect: /^beta 1$/,
+    needs: s => s.rlSteps === 0 && s.ref && s.beta !== 1 },
+
+  { title: "…fifty steps",
+    body: `The policy stops well short of G. E[RM] is lower than in the loose run; E[true] is
+    higher. β is not a safety feature bolted on — it's the reason RLHF works at all, because
+    the reward model is only trustworthy near the data it was trained on, which is near π_ref.`,
+    try: "rlhf step 50", expect: /^rlhf step 50$/,
+    needs: s => s.beta === 1 && s.rlSteps === 0 && s.ref },
+
+  { title: "There's a closed form",
+    body: `With a KL penalty, the optimal policy isn't a mystery: π*(y) ∝ π_ref(y)·exp(r(y)/β).
+    Compare it with where the gradient steps have arrived. RLHF is an expensive way of
+    computing this when you can't enumerate the answers — and here, we can.`,
+    try: "optimum", expect: /^optimum$/, readonly: true,
+    needs: s => s.beta === 1 && s.rlSteps === 50 },
+
+  { title: "DPO: skip the reward model",
+    body: `Reset again. DPO takes the same closed form, substitutes it back into the
+    Bradley–Terry likelihood, and gets a loss on the comparisons directly: raise
+    log π(winner) − log π(loser), scaled so pairs the policy already gets right stop
+    mattering. Same destination, no separate reward model to train, hack, or maintain.`,
+    try: "reset rlhf", expect: /^reset rlhf$/,
+    needs: s => s.rlSteps === 50 },
+
+  { title: "…thirty DPO steps",
+    body: `Compare the final bars with the RLHF run at the same β. The comparisons carried the
+    labelers' enthusiasm bias too, so DPO inherits it — just without a middleman.`,
+    try: "dpo step 30", expect: /^dpo step 30$/,
+    needs: s => s.rlSteps === 0 && s.dpoSteps === 0 && s.ref && s.pairs.length },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>beta 0</code> and fifty RLHF steps to
+    watch the policy collapse entirely onto G; <code>rm collect 300</code> before training to
+    see whether more labels fix the bias (they don't — bias isn't noise); or SFT for a hundred
+    steps and notice that imitation never discovers B or G at all.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   5. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("beta").addEventListener("change", e => run(`beta ${e.target.value}`));
+document.getElementById("lr").addEventListener("change", e => run(`lr ${e.target.value}`));
+document.getElementById("b-sft").onclick = () => run("sft step");
+document.getElementById("b-rlhf").onclick = () => run("rlhf step");
+document.getElementById("b-dpo").onclick = () => run("dpo step");
+document.getElementById("b-sample").onclick = () => run("sample");
+document.querySelectorAll("#pipe .stg").forEach(el => el.onclick = () => run(`stage ${el.dataset.s}`));
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Post-training sandbox loaded. Type 'help', or: sample 5", "dim");
+</script>
+</body>
+</html>
