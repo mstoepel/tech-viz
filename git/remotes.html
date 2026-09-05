@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remotes and sync — a git sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Three pointers matter here and each gets a colour: your branch (purple),
+   your *copy* of the remote's branch (cyan, origin/main), and the remote's
+   actual branch (green). Most confusion is the cyan one being stale.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --head:#e8a33d; --ref:#b08be8; --track:#5cc8d6; --remote:#6fbf73;
+  --mate:#e07aa8; --danger:#e06c6c; --dead:#3f4c59;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--track)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--ref);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--ref);color:var(--ref)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--ref);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: one graph, two bands. Local on top, origin below, sharing
+   an x-axis so the same commit sits in the same column in both — which makes
+   "origin has this and I don't" a visible gap instead of a sentence.
+   ========================================================================= */
+.graphbox{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2)}
+.bands{display:grid;grid-template-columns:96px 1fr}
+.labels{border-right:1px solid var(--line);display:flex;flex-direction:column}
+.labels div{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  padding:10px 8px;display:flex;flex-direction:column;justify-content:center;gap:2px}
+.labels div span{font-family:var(--code);font-size:10px;letter-spacing:0;text-transform:none;color:var(--ink-faint)}
+.labels .local{color:var(--ref)} .labels .origin{color:var(--remote);border-top:1px dashed var(--line)}
+.scroller{overflow-x:auto;overflow-y:hidden}
+#graph{display:block}
+#graph text{font-family:var(--code)}
+#graph .id{font-size:10px;fill:var(--ink-faint)}
+#graph .pill text{font-size:10px;font-weight:700}
+#graph .pill rect{rx:3;ry:3}
+#graph .node circle.core{fill:var(--panel-2);stroke-width:1.6}
+#graph .node.merge circle.ring{fill:none;stroke-width:1;opacity:.6}
+#graph .node.flash circle.core{fill:rgba(176,139,232,.35)}
+#graph .divider{stroke:var(--line);stroke-dasharray:4 4}
+.legend{display:flex;gap:14px;flex-wrap:wrap;padding:6px 12px 10px;
+  font-family:var(--code);font-size:11px;color:var(--ink-faint);border-top:1px solid var(--line)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;
+  vertical-align:-1px;border:1.5px solid currentColor}
+.legend b{display:inline-block;padding:0 5px;border-radius:3px;font-weight:700;margin-right:4px;color:#12181f}
+
+.refs{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+.refbox{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.refbox table{border-collapse:collapse;width:100%;font-family:var(--code);font-size:11.5px}
+.refbox td{padding:7px 12px;border-bottom:1px solid rgba(46,58,71,.55);vertical-align:top}
+.refbox tr:last-child td{border-bottom:none}
+.refbox td.path{color:var(--ink-faint);white-space:nowrap}
+.refbox td.val{color:var(--ink);transition:background .5s}
+.refbox td.val.flash{background:rgba(176,139,232,.16)}
+.refbox td.head{color:var(--head)} .refbox td.track{color:var(--track)} .refbox td.remote{color:var(--remote)}
+.refbox .sync{font-family:var(--sans);font-size:11.5px;color:var(--ink-faint);padding:8px 12px;border-top:1px solid var(--line)}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:200px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--ref)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--remote)} .log .mod{color:var(--head)} .log .err{color:var(--danger)}
+.log .hd{color:var(--head)} .log .tr{color:var(--track)} .log .mate{color:var(--mate)}
+.log .mate::before{content:"(teammate) ";color:var(--ink-faint)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--ref)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:640px){
+  .bands{grid-template-columns:64px 1fr}
+  .labels div{padding:8px 5px;font-size:9px}
+  .refs{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 03 · Git internals</p>
+  <h1><em>origin/main</em> is not the remote. It's your memory of it</h1>
+  <p class="standfirst">Your clone has three pointers for one branch: <code>main</code>,
+  <code>origin/main</code>, and the real <code>main</code> on the server. Only fetch and
+  push move the last two. Every "behind", "rejected", and "diverged" message is one of
+  these three being out of step with another.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="graphbox">
+    <div class="cap">Two repositories · same commit, same column</div>
+    <div class="bands">
+      <div class="labels">
+        <div class="local" id="lbl-local">Local<span>your clone</span></div>
+        <div class="origin" id="lbl-origin">Origin<span>the server</span></div>
+      </div>
+      <div class="scroller" id="scroller"><svg id="graph" role="img" aria-label="local and origin commit graphs"></svg></div>
+    </div>
+    <div class="legend">
+      <span><b style="background:var(--head)">HEAD → main</b>your branch</span>
+      <span><b style="background:var(--track)">origin/main</b>your copy of the remote's branch</span>
+      <span><b style="background:var(--remote)">main</b>the remote's actual branch</span>
+      <span><i style="color:var(--mate)"></i>teammate's commit</span>
+      <span><i style="color:var(--dead)"></i>unreachable</span>
+    </div>
+  </div>
+
+  <div class="refs">
+    <div class="refbox">
+      <div class="cap">local · .git/</div>
+      <table><tbody id="refs-local"></tbody></table>
+      <div class="sync" id="sync"></div>
+    </div>
+    <div class="refbox">
+      <div class="cap">origin · what the server holds</div>
+      <table><tbody id="refs-origin"></tbody></table>
+      <div class="sync" id="truth"></div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="git command" placeholder="git status">
+    </div>
+  </div>
+  <p class="hintbar">Try <code>help</code> · <code>git commit -m "x"</code> · <code>teammate commit -m "y"</code> ·
+  <code>git fetch</code> · <code>git pull --rebase</code> · <code>git push --force</code> · ↑ for history</p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as
+    <a href="branching.html">Branches are pointers</a>. One shared commit map (ids are
+    content-addressed, so the same commit has the same id in both repos) plus, per repo,
+    the set of commits it has and the refs it holds. <code>teammate</code> stands in for
+    everyone else with push access. No conflicts: this page is about pointers, not content.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   commits: shared object store, id → {id, msg, parents, lane, by}.
+   local:   {has:Set-as-array, branches:{main}, remote:{"origin/main"}, head}
+   origin:  {has, branches:{main}}
+   Two repos never share a ref. They only share objects, and only after a
+   fetch or push copies them across.
+   ========================================================================= */
+const hex = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, "0");
+const newId = () => hex() + hex().slice(0, 2);
+
+function initialState() {
+  const c = {
+    e3a1f7:   { id: "e3a1f7", msg: "Add project skeleton", parents: [],         lane: 0, by: "you" },
+    "9d4c02": { id: "9d4c02", msg: "Add app entry point",  parents: ["e3a1f7"], lane: 0, by: "you" },
+    "5ab8e1": { id: "5ab8e1", msg: "Document setup steps", parents: ["9d4c02"], lane: 0, by: "you" }
+  };
+  const all = Object.keys(c);
+  return {
+    commits: c, order: [...all],
+    local:  { has: [...all], branches: { main: "5ab8e1" }, remote: { "origin/main": "5ab8e1" }, head: { branch: "main" } },
+    origin: { has: [...all], branches: { main: "5ab8e1" } }
+  };
+}
+
+const clone = s => structuredClone(s);
+const short = id => id.slice(0, 7);
+const L = s => s.local.branches.main;                 /* your main */
+const R = s => s.local.remote["origin/main"];         /* your copy of origin's main */
+const O = s => s.origin.branches.main;                /* origin's actual main */
+const isMerge = c => c.parents.length > 1;
+
+function ancestors(s, id) {
+  const seen = new Set(), stack = [id];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || seen.has(cur)) continue;
+    seen.add(cur);
+    stack.push(...s.commits[cur].parents);
+  }
+  return seen;
+}
+const isAncestor = (s, a, b) => ancestors(s, b).has(a);
+const diverged = (s, a, b) => a !== b && !isAncestor(s, a, b) && !isAncestor(s, b, a);
+function mergeBase(s, a, b) {
+  const A = ancestors(s, a); let best = null;
+  for (const id of ancestors(s, b))
+    if (A.has(id) && (best === null || s.order.indexOf(id) > s.order.indexOf(best))) best = id;
+  return best;
+}
+const onlyIn = (s, a, b) => [...ancestors(s, a)].filter(id => !ancestors(s, b).has(id));
+const give = (repo, s, id) => ancestors(s, id).forEach(x => { if (!repo.has.includes(x)) repo.has.push(x); });
+
+function resolve(s, ref) {
+  if (!ref || ref === "HEAD") return L(s);
+  const m = /^(.*?)(?:~(\d+)|(\^+))?$/.exec(ref);
+  const base = m[1] || "HEAD";
+  let back = m[2] ? +m[2] : (m[3] ? m[3].length : 0);
+  let id = base === "HEAD" ? L(s) : s.local.branches[base] ?? s.local.remote[base]
+         ?? s.local.has.find(i => i.startsWith(base)) ?? null;
+  if (!id) return null;
+  while (back-- > 0) { const p = s.commits[id].parents[0]; if (!p) return null; id = p; }
+  return id;
+}
+
+/* ============================================================================
+   2. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const positional = args => args.filter(a => !a.startsWith("-"));
+const msgOf = raw => { const m = /-m\s+("([^"]*)"|'([^']*)'|(\S+))/.exec(raw); return (m && (m[2] ?? m[3] ?? m[4])) || "Update"; };
+
+function addCommit(n, msg, parents, lane, by) {
+  const id = newId();
+  n.commits[id] = { id, msg, parents, lane, by };
+  n.order.push(id);
+  return id;
+}
+
+function statusLines(s) {
+  const ahead = onlyIn(s, L(s), R(s)).length, behind = onlyIn(s, R(s), L(s)).length;
+  const out = [line("On branch main", "ok")];
+  if (!ahead && !behind) out.push(line("Your branch is up to date with 'origin/main'.", "ok"));
+  else if (ahead && !behind) out.push(line(`Your branch is ahead of 'origin/main' by ${ahead} commit${ahead > 1 ? "s" : ""}.`, "hd"));
+  else if (behind && !ahead) out.push(line(`Your branch is behind 'origin/main' by ${behind} commit${behind > 1 ? "s" : ""}, and can be fast-forwarded.`, "tr"));
+  else out.push(line(`Your branch and 'origin/main' have diverged, and have ${ahead} and ${behind} different commits each, respectively.`, "mod"));
+  if (R(s) !== O(s)) out.push(line("(status only compares against origin/main — your copy. It cannot know what the server has until you fetch.)", "dim"));
+  return out;
+}
+
+/* fetch: copy origin's objects over and move the tracking ref. Pure helper. */
+function doFetch(n) {
+  const before = R(n);
+  give(n.local, n, O(n));
+  n.local.remote["origin/main"] = O(n);
+  if (before === O(n)) return [line("(fetch) origin/main already at " + short(O(n)) + " — nothing new on the server", "dim")];
+  return [line(`From origin`, "ok"), line(`   ${short(before)}..${short(O(n))}  main  -> origin/main`, "tr"),
+          line("objects copied in, origin/main moved. main did not move — fetch never touches your branch", "dim")];
+}
+
+function doMerge(n, ref, label) {
+  const target = n.local.remote[ref] ?? n.local.branches[ref] ?? resolve(n, ref);
+  if (!target) return fail(`merge: ${ref} - not something we can merge`);
+  const cur = L(n);
+  if (isAncestor(n, target, cur)) return { state: n, out: [line("Already up to date.", "dim")] };
+  if (isAncestor(n, cur, target)) {
+    n.local.branches.main = target;
+    return { state: n, out: [line(`Updating ${short(cur)}..${short(target)}`, "ok"), line("Fast-forward", "add"),
+      line("main was an ancestor of origin/main, so it just slid forward. No new commit.", "dim")] };
+  }
+  const id = addCommit(n, `Merge ${label}`, [cur, target], 0, "you");
+  n.local.branches.main = id;
+  return { state: n, out: [line(`merge base ${short(mergeBase(n, cur, target))}`, "dim"),
+    line(`[main ${short(id)}] Merge ${label}  (parents ${short(cur)}, ${short(target)})`, "add"),
+    line("a merge commit ties both lines together; nothing on origin changed yet", "dim")] };
+}
+
+function doRebase(n, ref) {
+  const onto = n.local.remote[ref] ?? n.local.branches[ref] ?? resolve(n, ref);
+  if (!onto) return fail(`fatal: invalid upstream '${ref}'`);
+  const cur = L(n);
+  if (isAncestor(n, onto, cur)) return { state: n, out: [line("Current branch main is up to date.", "dim")] };
+  if (isAncestor(n, cur, onto)) { n.local.branches.main = onto; return { state: n, out: [line("Fast-forwarded main to " + ref + ".", "add")] }; }
+  const replay = n.order.filter(id => ancestors(n, cur).has(id) && !ancestors(n, onto).has(id) && !isMerge(n.commits[id]));
+  const out = [line(`replaying ${replay.length} local commit(s) onto ${short(onto)}`, "dim")];
+  let parent = onto;
+  replay.forEach((old, i) => {
+    const id = addCommit(n, n.commits[old].msg, [parent], 0, "you");
+    out.push(line(`Rebasing (${i + 1}/${replay.length}): ${n.commits[old].msg}   ${short(old)} → ${short(id)}`, "mod"));
+    parent = id;
+  });
+  n.local.branches.main = parent;
+  out.push(line("Successfully rebased and updated refs/heads/main.", "add"));
+  out.push(line("your commits were copied onto the remote's tip; the originals are orphaned. History is linear again.", "dim"));
+  return { state: n, out };
+}
+
+const REGISTRY = {
+
+  "git status": s => ({ out: statusLines(s) }),
+
+  "git commit": (s, args, raw) => {
+    const n = clone(s), msg = msgOf(raw);
+    const id = addCommit(n, msg, [L(n)], 0, "you");
+    n.local.branches.main = id; n.local.has.push(id);
+    return { state: n, out: [line(`[main ${short(id)}] ${msg}`, "add"),
+      line("main moved. origin/main and the server know nothing about this yet.", "dim")] };
+  },
+
+  "git fetch": s => { const n = clone(s); return { state: n, out: doFetch(n) }; },
+
+  "git push": (s, args) => {
+    const force = args.includes("--force") || args.includes("-f") || args.includes("--force-with-lease");
+    const n = clone(s), l = L(n), o = O(n);
+    if (l === o) return { out: [line("Everything up-to-date", "dim")] };
+    if (isAncestor(n, o, l)) {
+      give(n.origin, n, l);
+      n.origin.branches.main = l; n.local.remote["origin/main"] = l;
+      return { state: n, out: [line("To origin", "ok"), line(`   ${short(o)}..${short(l)}  main -> main`, "add"),
+        line("the server's main was an ancestor of yours: objects sent, server ref fast-forwarded, origin/main updated", "dim")] };
+    }
+    if (!force) return { out: [
+      line(" ! [rejected]        main -> main (fetch first)", "err"),
+      line("error: failed to push some refs to 'origin'", "err"),
+      line("hint: the server's main has commits yours doesn't. A push may only fast-forward the remote ref.", "dim"),
+      line("hint: fetch, then merge or rebase, then push again.", "dim")
+    ] };
+    const lost = onlyIn(n, o, l);
+    give(n.origin, n, l);
+    n.origin.branches.main = l; n.local.remote["origin/main"] = l;
+    return { state: n, out: [line("To origin", "ok"), line(` + ${short(o)}...${short(l)}  main -> main (forced update)`, "mod"),
+      line(`the server's main was moved to your tip regardless. ${lost.length} commit(s) on origin are now unreachable there —`, "err"),
+      line("anyone who already pulled them still has them, and their next push will bring the mess back.", "dim")] };
+  },
+
+  "git pull": (s, args) => {
+    const n = clone(s);
+    const out = doFetch(n);
+    const r = args.includes("--rebase") ? doRebase(n, "origin/main") : doMerge(n, "origin/main", "branch 'main' of origin");
+    if (r.error) return r;
+    return { state: r.state, out: [...out, line(args.includes("--rebase") ? "(then rebase onto origin/main)" : "(then merge origin/main)", "dim"), ...r.out] };
+  },
+
+  "git merge":  (s, args) => doMerge(clone(s), positional(args)[0] || "origin/main", positional(args)[0] || "origin/main"),
+  "git rebase": (s, args) => doRebase(clone(s), positional(args)[0] || "origin/main"),
+
+  "git reset": (s, args) => {
+    const ref = positional(args)[0];
+    const id = resolve(s, ref);
+    if (!id) return fail(`fatal: ambiguous argument '${ref}': unknown revision`);
+    const n = clone(s); n.local.branches.main = id;
+    return { state: n, out: [line(`main  →  ${short(id)}`, "mod"),
+      line("local pointer only. origin/main and the server are untouched — which is exactly the problem if you already pushed.", "dim")] };
+  },
+
+  "git log": (s, args) => {
+    const all = args.includes("--all");
+    const tips = all ? [L(s), R(s)] : [L(s)];
+    const seen = new Set(); tips.forEach(t => ancestors(s, t).forEach(id => seen.add(id)));
+    return { out: [...s.order].reverse().filter(id => seen.has(id)).map(id => {
+      const c = s.commits[id], d = [];
+      if (id === L(s)) d.push("HEAD -> main");
+      if (id === R(s)) d.push("origin/main");
+      return line(`${isMerge(c) ? "◎" : "●"} ${short(id)}${d.length ? ` (${d.join(", ")})` : ""} ${c.msg}${c.by === "mate" ? "  [teammate]" : ""}`, d.length ? "hd" : "ok");
+    }) };
+  },
+
+  /* Someone else with push access. They commit on the server's tip and push
+     in one move; the details of their clone are not the lesson. */
+  "teammate": (s, args, raw) => {
+    if (args[0] !== "commit" && args[0] !== "push") return fail("usage: teammate commit -m \"msg\"");
+    const n = clone(s), msg = msgOf(raw);
+    const id = addCommit(n, msg, [O(n)], 1, "mate");
+    n.origin.has.push(id); n.origin.branches.main = id;
+    return { state: n, out: [line(`[main ${short(id)}] ${msg} — pushed to origin`, "mate"),
+      line("the server's main moved. Your clone has no idea: origin/main is exactly where it was.", "dim")] };
+  },
+
+  "help": () => ({ out: [
+    line("git status                 compare main with origin/main (your copy!)", "ok"),
+    line("git commit -m \"msg\"        move main", "ok"),
+    line("git fetch                  copy objects from the server; move origin/main", "ok"),
+    line("git push [--force]         fast-forward the server's main to yours, or overwrite it", "ok"),
+    line("git pull [--rebase]        fetch, then merge (or rebase onto) origin/main", "ok"),
+    line("git merge / rebase origin/main", "ok"),
+    line("git reset --hard <ref>     move main (local only)", "ok"),
+    line("git log [--all] · restart", "ok"),
+    line("teammate commit -m \"msg\"   someone else pushes to the server", "mate"),
+  ] }),
+
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+
+/* ============================================================================
+   3. PARSER
+   ========================================================================= */
+function tokenize(str) { return (str.match(/"[^"]*"|'[^']*'|\S+/g) || []); }
+function dispatch(state, raw) {
+  const tok = tokenize(raw.trim());
+  if (!tok.length) return null;
+  for (const n of [2, 1]) {
+    const key = tok.slice(0, n).join(" ");
+    if (REGISTRY[key]) return REGISTRY[key](state, tok.slice(n).map(t => t.replace(/^["']|["']$/g, "")), raw);
+  }
+  return fail(`${tok[0]}: command not found — try 'help'`);
+}
+
+/* ============================================================================
+   4. RENDERER — one SVG, two bands, shared x = global creation order.
+   ========================================================================= */
+const GAP = 84, ROW = 64, LEFT = 40, BAND_PAD = 34;
+let prevIds = null, prevRefs = null;
+
+function bandModel(s, repo, which) {
+  const has = new Set(repo.has);
+  const tips = which === "local" ? [L(s), R(s)] : [O(s)];
+  const live = new Set(); tips.forEach(t => ancestors(s, t).forEach(id => live.add(id)));
+  const nodes = s.order.map((id, i) => ({ ...s.commits[id], i, key: which + ":" + id, which }))
+    .filter(n => has.has(n.id)).map(n => ({ ...n, live: live.has(n.id) }));
+  const lanes = [...new Set(nodes.map(n => n.lane))].sort((a, b) => a - b);
+  return { nodes, lanes, rowOf: new Map(lanes.map((l, r) => [l, r])) };
+}
+
+function render(s) {
+  const loc = bandModel(s, s.local, "local"), org = bandModel(s, s.origin, "origin");
+  const bandH = m => BAND_PAD + (m.lanes.length - 1) * ROW + 44;
+  const hL = bandH(loc), hO = bandH(org);
+  const topL = BAND_PAD, topO = hL + BAND_PAD;
+  const W = Math.max(360, LEFT + s.order.length * GAP + 10), H = hL + hO;
+  const svg = d3.select("#graph").attr("width", W).attr("height", H).attr("viewBox", `0 0 ${W} ${H}`);
+  document.getElementById("lbl-local").style.height = hL + "px";
+  document.getElementById("lbl-origin").style.height = hO + "px";
+  const T = d3.transition().duration(320);
+
+  const x = d => LEFT + d.i * GAP;
+  const y = d => (d.which === "local" ? topL + loc.rowOf.get(d.lane) * ROW : topO + org.rowOf.get(d.lane) * ROW);
+  const nodes = [...loc.nodes, ...org.nodes];
+  const byKey = new Map(nodes.map(n => [n.key, n]));
+  const colour = d => !d.live ? "var(--dead)" : d.by === "mate" ? "var(--mate)" : d.which === "local" ? "var(--ref)" : "var(--remote)";
+
+  svg.selectAll("line.divider").data([0]).join("line").attr("class", "divider")
+    .attr("x1", 0).attr("x2", W).attr("y1", hL).attr("y2", hL);
+
+  const edges = nodes.flatMap(c => c.parents.map(p => ({ key: c.key + "<" + p, c, p: byKey.get(c.which + ":" + p) })))
+    .filter(e => e.p);
+  const path = e => { const x1 = x(e.p), y1 = y(e.p), x2 = x(e.c), y2 = y(e.c);
+    return `M${x1},${y1} C${x1 + GAP * .5},${y1} ${x2 - GAP * .5},${y2} ${x2},${y2}`; };
+  const ed = svg.selectAll("path.edge").data(edges, d => d.key);
+  ed.exit().remove();
+  ed.enter().append("path").attr("class", "edge").attr("fill", "none").attr("stroke-width", 1.6)
+    .attr("d", path).attr("opacity", 0)
+    .merge(ed).transition(T).attr("d", path)
+    .attr("stroke", d => colour(d.c)).attr("opacity", d => d.c.live ? .8 : .3);
+
+  const nd = svg.selectAll("g.node").data(nodes, d => d.key);
+  nd.exit().remove();
+  const ne = nd.enter().append("g").attr("class", "node")
+    .attr("transform", d => `translate(${x(d)},${y(d)})`).attr("opacity", 0);
+  ne.append("circle").attr("class", "ring").attr("r", 14.5);
+  ne.append("circle").attr("class", "core").attr("r", 10);
+  ne.append("title");
+  ne.append("text").attr("class", "id").attr("y", 25).attr("text-anchor", "middle");
+  const nm = ne.merge(nd).attr("class", d => "node" + (isMerge(d) ? " merge" : ""));
+  nm.transition(T).attr("transform", d => `translate(${x(d)},${y(d)})`).attr("opacity", d => d.live ? 1 : .35);
+  nm.select("circle.core").attr("stroke", colour);
+  nm.select("circle.ring").attr("stroke", colour);
+  nm.select("text.id").text(d => short(d.id));
+  nm.select("title").text(d => `${short(d.id)}  ${d.msg}${d.by === "mate" ? " (teammate)" : ""}\nparents: ${d.parents.map(short).join(", ") || "none"}`);
+
+  /* pills above the commits they name, per band */
+  const pills = [];
+  const add = (which, id, key, text, fill) => {
+    const node = byKey.get(which + ":" + id); if (!node) return;
+    pills.push({ key, text, fill, node, k: pills.filter(p => p.node === node).length });
+  };
+  add("local", L(s), "l:head", "HEAD → main", "var(--head)");
+  add("local", R(s), "l:track", "origin/main", "var(--track)");
+  add("origin", O(s), "o:main", "main", "var(--remote)");
+  const pw = t => t.length * 6.4 + 12;
+  const pg = svg.selectAll("g.pill").data(pills, d => d.key);
+  pg.exit().remove();
+  const pe = pg.enter().append("g").attr("class", "pill")
+    .attr("transform", d => `translate(${x(d.node)},${y(d.node) - 22 - d.k * 16})`);
+  pe.append("rect").attr("height", 14).attr("y", -10.5);
+  pe.append("text").attr("y", 0).attr("text-anchor", "middle").attr("fill", "#12181f");
+  const pm = pe.merge(pg);
+  pm.transition(T).attr("transform", d => `translate(${x(d.node)},${y(d.node) - 22 - d.k * 16})`);
+  pm.select("rect").attr("width", d => pw(d.text)).attr("x", d => -pw(d.text) / 2).attr("fill", d => d.fill);
+  pm.select("text").text(d => d.text);
+
+  if (prevIds) {
+    nm.filter(d => !prevIds.has(d.key)).classed("flash", true)
+      .transition().delay(600).on("end", function () { d3.select(this).classed("flash", false); });
+    if (nodes.some(d => !prevIds.has(d.key))) {
+      const sc = document.getElementById("scroller");
+      sc.scrollTo({ left: sc.scrollWidth, behavior: "smooth" });
+    }
+  }
+  prevIds = new Set(nodes.map(n => n.key));
+  renderRefs(s);
+}
+
+function renderRefs(s) {
+  const table = (sel, rows) => {
+    const tr = d3.select(sel).selectAll("tr").data(rows, d => d.path);
+    tr.exit().remove();
+    const te = tr.enter().append("tr");
+    te.append("td").attr("class", "path"); te.append("td").attr("class", "val");
+    const tm = te.merge(tr).order();
+    tm.select("td.path").text(d => d.path);
+    tm.select("td.val").attr("class", d => "val " + d.cls).text(d => d.val)
+      .each(function (d) { if (prevRefs && prevRefs.get(d.path) !== d.val) { this.classList.add("flash"); setTimeout(() => this.classList.remove("flash"), 600); } });
+    return rows;
+  };
+  const rows = [
+    ...table("#refs-local", [
+      { path: ".git/HEAD", val: "ref: refs/heads/main", cls: "head" },
+      { path: "refs/heads/main", val: L(s), cls: "" },
+      { path: "refs/remotes/origin/main", val: R(s), cls: "track" }]),
+    ...table("#refs-origin", [{ path: "origin:refs/heads/main", val: O(s), cls: "remote" }])
+  ];
+  prevRefs = new Map(rows.map(r => [r.path, r.val]));
+  const ahead = onlyIn(s, L(s), R(s)).length, behind = onlyIn(s, R(s), L(s)).length;
+  document.getElementById("sync").textContent = `main vs origin/main: ${ahead} ahead, ${behind} behind` + (ahead && behind ? " — diverged" : "");
+  const stale = R(s) !== O(s);
+  document.getElementById("truth").textContent = stale
+    ? `origin/main is stale: the server's main is at ${short(O(s))}, your copy says ${short(R(s))}. Fetch to find out.`
+    : "origin/main matches the server. Your copy is current.";
+}
+
+/* ============================================================================
+   5. LESSON
+   ========================================================================= */
+const synced = s => L(s) === R(s) && R(s) === O(s);
+const ffable = s => L(s) !== O(s) && isAncestor(s, O(s), L(s));   /* push would fast-forward */
+
+const LESSON = [
+  { title: "Three pointers, one branch",
+    body: `Your clone holds <code>main</code> and <code>origin/main</code>. The server holds
+    its own <code>main</code>. Right now all three name the same commit, so both bands look
+    identical. Keep an eye on which of the three each command moves.`,
+    try: "git status", expect: /^git status/, readonly: true,
+    needs: s => synced(s) },
+
+  { title: "Commit locally",
+    body: `Only <code>main</code> moves. The server has no idea, and neither does
+    <code>origin/main</code> — it's a file in <em>your</em> .git that nobody has written
+    to. Status reports "ahead by 1", comparing against that file.`,
+    try: 'git commit -m "Add search box"', expect: /^git commit/,
+    needs: s => synced(s) },
+
+  { title: "Push",
+    body: `Push sends the missing objects and asks the server to move its <code>main</code>.
+    The server agrees because its current tip is an ancestor of yours — a
+    <strong>fast-forward</strong>. Then your <code>origin/main</code> is updated to match.
+    Push is the only command besides fetch that moves it.`,
+    try: "git push", expect: /^git push/,
+    needs: s => ffable(s) && R(s) === O(s) },
+
+  { title: "Meanwhile, a teammate pushes",
+    body: `Someone else lands a commit on the server. Watch the bottom band: the server's
+    <code>main</code> moves. Watch the top band: <strong>nothing</strong>. Your clone doesn't
+    poll. Your <code>origin/main</code> now points at a commit the server has moved past.`,
+    try: 'teammate commit -m "Fix login bug"', expect: /^teammate/,
+    needs: s => synced(s) },
+
+  { title: "Status can't see it",
+    body: `Status says up to date, and it is telling the truth about what it can see:
+    <code>main</code> equals <code>origin/main</code>. It has no way to know the server
+    moved. "Up to date" means "up to date with my last fetch".`,
+    try: "git status", expect: /^git status/, readonly: true,
+    needs: s => L(s) === R(s) && R(s) !== O(s) },
+
+  { title: "Fetch",
+    body: `Fetch copies the new objects into your clone and moves <code>origin/main</code>
+    to where the server's <code>main</code> is. Your own <code>main</code> stays put. Fetch
+    is always safe: it only ever updates your memory of the remote.`,
+    try: "git fetch", expect: /^git fetch/,
+    needs: s => L(s) === R(s) && R(s) !== O(s) },
+
+  { title: "Pull is fetch plus merge",
+    body: `Now <code>main</code> is a straight ancestor of <code>origin/main</code>, so
+    the merge half of pull is a fast-forward. Pull did a fetch first (nothing new) and then
+    slid <code>main</code> forward. No new commit.`,
+    try: "git pull", expect: /^git pull(?!.*--rebase)/,
+    needs: s => R(s) === O(s) && L(s) !== R(s) && isAncestor(s, L(s), R(s)) },
+
+  { title: "Now diverge: you commit…",
+    body: `Start a real conflict of pointers. First your side.`,
+    try: 'git commit -m "Add dark mode"', expect: /^git commit/,
+    needs: s => synced(s) },
+
+  { title: "…and so does the teammate",
+    body: `The server's <code>main</code> moves off in a different direction. Neither tip
+    is an ancestor of the other. Your <code>origin/main</code> is stale again, so your clone
+    still thinks it is simply "ahead by 1".`,
+    try: 'teammate commit -m "Update deps"', expect: /^teammate/,
+    needs: s => ffable(s) && R(s) === O(s) },
+
+  { title: "Push is rejected",
+    body: `The server checks whether its <code>main</code> is an ancestor of what you're
+    sending. It isn't, so it refuses — otherwise the teammate's commit would become
+    unreachable. Nothing moved. The hint says it all: <strong>fetch first</strong>.`,
+    try: "git push", expect: /^git push\s*$/, readonly: true,
+    needs: s => diverged(s, L(s), O(s)) },
+
+  { title: "Pull, merging",
+    body: `Fetch brings the teammate's commit in and moves <code>origin/main</code>. Then
+    merge ties the two tips together with a merge commit on <code>main</code>. Your
+    history now has a loop, and the server still knows nothing about any of it.`,
+    try: "git pull", expect: /^git pull(?!.*--rebase)/,
+    needs: s => diverged(s, L(s), O(s)) },
+
+  { title: "Push the merge",
+    body: `The server's <code>main</code> is now an ancestor of yours (it's one of the merge
+    commit's parents), so the push fast-forwards. The server gets your commit and the merge
+    commit; the loop is now shared history forever.`,
+    try: "git push", expect: /^git push/,
+    needs: s => ffable(s) && isMerge(s.commits[L(s)]) },
+
+  { title: "The rebase alternative: diverge again",
+    body: `Same setup as before — you commit, the teammate commits — but this time we'll
+    resolve it without a merge commit.`,
+    try: 'git commit -m "Add settings page"', expect: /^git commit/,
+    needs: s => synced(s) },
+
+  { title: "…teammate again",
+    body: `Server moves, your copy of it doesn't.`,
+    try: 'teammate commit -m "Bump version"', expect: /^teammate/,
+    needs: s => ffable(s) && R(s) === O(s) },
+
+  { title: "Pull with rebase",
+    body: `Fetch, then replay your local commit <strong>on top of</strong> the fetched
+    <code>origin/main</code>. Your commit gets a new id; the original is orphaned. History is
+    a straight line, and the server's tip is now an ancestor of yours.`,
+    try: "git pull --rebase", expect: /^git pull --rebase|^git rebase/,
+    needs: s => diverged(s, L(s), O(s)) },
+
+  { title: "Push: a fast-forward again",
+    body: `Linear history, no merge commit, same content as the merge version. Rebasing
+    your own unpushed commits is safe precisely because nobody else has their ids yet.`,
+    try: "git push", expect: /^git push/,
+    needs: s => ffable(s) && !isMerge(s.commits[L(s)]) },
+
+  { title: "Rewrite something already pushed",
+    body: `Move <code>main</code> back one commit. Locally that's a pointer move, like any
+    reset. But the server's <code>main</code> still points at the commit you just dropped,
+    so from the server's point of view you are now <em>behind</em>, not ahead.`,
+    try: "git reset --hard HEAD~1", expect: /^git reset/,
+    needs: s => synced(s) && s.commits[L(s)].parents.length },
+
+  { title: "Force push",
+    body: `A normal push would be rejected (not a fast-forward). <code>--force</code> tells
+    the server to move its <code>main</code> to your tip anyway. The dropped commit goes
+    unreachable on the server — but the teammate's clone still has it, and their next pull
+    or push will resurrect it or fail. This is why force-pushing a shared branch is the
+    one thing everyone agrees not to do.`,
+    try: "git push --force", expect: /^git push (--force|-f|--force-with-lease)/,
+    needs: s => L(s) !== O(s) && isAncestor(s, L(s), O(s)) },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try letting the teammate push twice before you
+    fetch, or a rebase after a merge, and keep watching which of the three pointers each
+    command is allowed to move.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   6. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Remotes sandbox loaded. Type 'help' for the command list.", "dim");
+</script>
+</body>
+</html>

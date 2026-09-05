@@ -67,6 +67,7 @@ const TOPICS = [
   { id: "git",    title: "Git internals" },
   { id: "docker", title: "Containers" },
   { id: "k8s",    title: "Orchestration" },
+  { id: "db",     title: "Databases" },
   { id: "ml",     title: "Machine learning" }
 ];
 
@@ -77,11 +78,18 @@ const VIZ = [
   { topic: "git", path: "git/branching.html", title: "Branches are pointers",
     blurb: `A branch is a file holding one commit id. Fast-forward, merge commits,
             rebase and detached HEAD, watched at the level of which files get rewritten.` },
+  { topic: "git", path: "git/remotes.html", title: "Remotes and sync",
+    blurb: `Two repositories, one graph. Why <code>origin/main</code> only moves on fetch,
+            why a push gets rejected, what pull really does, and what a force push overwrites.` },
   { topic: "docker", path: "docker/layers.html", title: "Image layers",
     blurb: `One instruction, one layer, one hash. Where the build cache breaks, why
             Dockerfile order matters, and what a container adds on top.` },
-  { topic: "k8s", status: "planned", title: "Kubernetes reconciliation",
-    blurb: `Desired state, observed state, and the controllers that close the gap.` },
+  { topic: "k8s", status: "planned", title: "Reconciliation",
+    blurb: `Desired state, observed state, and the control loop that closes the gap.
+            Kill a pod, change a replica count, watch a rolling update stagger.` },
+  { topic: "db", status: "planned", title: "Transactions and isolation",
+    blurb: `Two transactions, one table. Interleave statements by hand and watch dirty
+            reads, non-repeatable reads and phantoms appear as the isolation level drops.` },
   { topic: "ml", status: "planned", title: "Diffusion models",
     blurb: `Adding noise forward, learning to remove it backward.` }
 ];
