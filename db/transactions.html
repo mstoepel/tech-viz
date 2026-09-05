@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transactions and isolation — a database sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Two transactions, two hues. Committed truth is plain ink. Anything
+   uncommitted is amber and dashed. Anomalies get badges: red for dirty
+   reads and serialization failures, amber for non-repeatable, pink for
+   phantoms — the three things isolation levels exist to prevent.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --t1:#b08be8; --t2:#5cc8d6; --dirty:#e8a33d; --ok:#6fbf73; --bad:#e06c6c; --phantom:#e07aa8;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--dirty)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--t1);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--t1);color:var(--t1)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--t1);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: T1 | the table | T2. Each transaction column shows what it
+   ran, what it got, and — at the bottom — what it would see right now. The
+   middle shows what is actually committed, with uncommitted writes hovering
+   over it as amber ghosts. Isolation level is the dial across the top.
+   ========================================================================= */
+.levels{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px;
+  font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+.levels .lv{border:1px solid var(--line);border-radius:999px;padding:3px 10px;letter-spacing:.06em;
+  text-transform:uppercase;transition:all .3s;cursor:pointer}
+.levels .lv.on{border-color:var(--dirty);color:var(--dirty);background:rgba(232,163,61,.1)}
+.levels .lv:hover{color:var(--ink)}
+.stage{display:grid;grid-template-columns:1fr 250px 1fr;gap:12px;align-items:start}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.cap .st{letter-spacing:.04em;text-transform:none}
+.tx.t1 .cap{color:var(--t1)} .tx.t2 .cap{color:var(--t2)}
+.tx.active{border-color:var(--ink-faint)}
+.tx.waiting{border-color:var(--dirty)} .tx.waiting .cap .st{color:var(--dirty)}
+.tx.aborted .cap .st{color:var(--bad)} .tx.committed .cap .st{color:var(--ok)}
+.stmts{padding:8px 12px;min-height:120px;font-family:var(--code);font-size:11.5px;display:flex;flex-direction:column;gap:8px}
+.stmt .sql{color:var(--ink)} .stmt .sql::before{content:"› ";color:var(--ink-faint)}
+.stmt .res{color:var(--ink-dim);padding-left:12px;white-space:pre-wrap}
+.stmt .res.err{color:var(--bad)} .stmt .res.wait{color:var(--dirty)}
+.stmt.flash .sql{background:rgba(176,139,232,.16)}
+.badge{display:inline-block;font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+  border-radius:3px;padding:1px 6px;margin-left:6px;color:#12181f;vertical-align:1px}
+.badge.dirty{background:var(--bad)} .badge.nonrep{background:var(--dirty)} .badge.phantom{background:var(--phantom)}
+.badge.serial{background:var(--bad)} .badge.ok{background:var(--ok)}
+.stmts .none{color:var(--ink-faint)}
+.view{border-top:1px solid var(--line);padding:8px 12px}
+.view .vt{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+table.rows{border-collapse:collapse;width:100%;font-family:var(--code);font-size:11.5px}
+table.rows td,table.rows th{padding:4px 6px;text-align:left;border-bottom:1px solid rgba(46,58,71,.55)}
+table.rows th{font-weight:400;color:var(--ink-faint);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+table.rows tr:last-child td{border-bottom:none}
+table.rows td.num{text-align:right}
+table.rows tr.ghost td{color:var(--dirty);border-style:dashed}
+table.rows tr.ghost.t1 td:first-child{border-left:2px solid var(--t1)}
+table.rows tr.ghost.t2 td:first-child{border-left:2px solid var(--t2)}
+table.rows tr.gone td{text-decoration:line-through;color:var(--ink-faint)}
+table.rows tr.stale td{color:var(--ink-dim);font-style:italic}
+table.rows td.flash{background:rgba(176,163,61,.18)}
+table.rows tr.dirtyv td{color:var(--dirty)}
+.tbl .note{font-family:var(--code);font-size:10.5px;color:var(--ink-faint);padding:6px 12px 10px;border-top:1px solid var(--line)}
+.legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--t1)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--ok)} .log .mod{color:var(--dirty)} .log .err{color:var(--bad)}
+.log .c1{color:var(--t1)} .log .c2{color:var(--t2)} .log .ph{color:var(--phantom)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--t1)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:820px){
+  .stage{grid-template-columns:1fr 1fr}
+  .tbl{grid-column:1 / -1;order:-1}
+}
+@media (max-width:520px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 01 · Databases</p>
+  <h1>Isolation levels are a list of <em>lies</em> you agree to be told</h1>
+  <p class="standfirst">Two transactions run at once against one table. Interleave their
+  statements by hand. At each isolation level the database is allowed to show you something
+  slightly untrue, in exchange for speed — and each level forbids exactly one more kind of
+  untruth than the last.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="levels" id="levels">
+    <span>isolation for new transactions:</span>
+    <span class="lv" data-l="read uncommitted">read uncommitted</span>
+    <span class="lv" data-l="read committed">read committed</span>
+    <span class="lv" data-l="repeatable read">repeatable read</span>
+    <span class="lv" data-l="serializable">serializable</span>
+  </div>
+  <div class="stage">
+    <div class="box tx t1" id="t1">
+      <div class="cap"><span>T1</span><span class="st"></span></div>
+      <div class="stmts"></div>
+      <div class="view"><div class="vt">what T1 sees right now</div><table class="rows"><tbody></tbody></table></div>
+    </div>
+    <div class="box tbl" id="tbl">
+      <div class="cap"><span>accounts · committed</span><span class="st" id="ver"></span></div>
+      <table class="rows"><thead><tr><th>id</th><th>name</th><th class="num">balance</th></tr></thead><tbody id="rows"></tbody></table>
+      <div class="note" id="tblnote"></div>
+    </div>
+    <div class="box tx t2" id="t2">
+      <div class="cap"><span>T2</span><span class="st"></span></div>
+      <div class="stmts"></div>
+      <div class="view"><div class="vt">what T2 sees right now</div><table class="rows"><tbody></tbody></table></div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><span class="badge dirty">dirty read</span> read data that was never committed</span>
+    <span><span class="badge nonrep">non-repeatable</span> same row, same transaction, different value</span>
+    <span><span class="badge phantom">phantom</span> same query, same transaction, different rows</span>
+    <span><span class="badge serial">serialization failure</span> the database refused, retry</span>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="sql command" placeholder="t1 select * from accounts">
+    </div>
+  </div>
+  <p class="hintbar">Prefix every statement with <code>t1</code> or <code>t2</code> ·
+  <code>t1 update accounts set balance = balance - 100 where id = 1</code> ·
+  <code>t2 select * from accounts where balance > 700</code> · <code>t1 commit</code> ·
+  <code>isolation serializable</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. The engine is a toy
+    MVCC: a committed table with per-row versions, per-transaction private writes, row locks
+    for write/write conflicts, and a read rule per isolation level. <em>Repeatable read</em>
+    here follows the SQL standard (rows you've read stay stable; new rows can appear).
+    Postgres and MySQL implement it as snapshot isolation, which is stricter and stops
+    phantoms too. Serializable is snapshot plus first-committer-wins.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   table:  committed rows, each with the seq of the statement that wrote it.
+   txns:   t1/t2 — status, level, private writes, remembered reads, snapshot,
+           a read log for anomaly detection, and a statement log for display.
+   ========================================================================= */
+const LEVELS = ["read uncommitted", "read committed", "repeatable read", "serializable"];
+
+function freshTxn(id) {
+  return { id, status: "idle", level: null, start: 0, writes: {}, seen: {}, snapshot: null,
+           reads: [], log: [], pending: null };
+}
+function initialState() {
+  return {
+    seq: 0, level: "read committed",
+    table: { 1: { id: 1, name: "alice", balance: 1000, v: 0 }, 2: { id: 2, name: "bob", balance: 500, v: 0 } },
+    txns: { t1: freshTxn("t1"), t2: freshTxn("t2") }
+  };
+}
+const clone = s => structuredClone(s);
+const other = id => id === "t1" ? "t2" : "t1";
+const isActive = t => t.status === "active" || t.status === "waiting";
+
+/* ----------------------------------------------------------------------------
+   Visibility: what does transaction T see for row id, at its level?
+   Returns {row|null, src} where src ∈ own | dirty | committed | seen | snapshot.
+   ------------------------------------------------------------------------- */
+function visible(s, t, id) {
+  if (id in t.writes) return { row: t.writes[id], src: "own" };
+  const o = s.txns[other(t.id)];
+  if (t.level === "read uncommitted" && isActive(o) && id in o.writes) return { row: o.writes[id], src: "dirty" };
+  if (t.level === "repeatable read" && id in t.seen) return { row: t.seen[id], src: "seen" };
+  if (t.level === "serializable" && t.snapshot) return { row: t.snapshot[id] ?? null, src: "snapshot" };
+  return { row: s.table[id] ?? null, src: "committed" };
+}
+function candidateIds(s, t) {
+  const ids = new Set(Object.keys(s.table).map(Number));
+  Object.keys(t.writes).forEach(k => ids.add(+k));
+  const o = s.txns[other(t.id)];
+  if (t.level === "read uncommitted" && isActive(o)) Object.keys(o.writes).forEach(k => ids.add(+k));
+  if (t.level === "repeatable read") Object.keys(t.seen).forEach(k => ids.add(+k));
+  if (t.level === "serializable" && t.snapshot) Object.keys(t.snapshot).forEach(k => ids.add(+k));
+  return [...ids].sort((a, b) => a - b);
+}
+/* the whole table as T sees it, for the "sees right now" panel */
+function viewOf(s, t) {
+  if (!isActive(t)) return Object.values(s.table).map(r => ({ ...r, src: "committed" }));
+  return candidateIds(s, t).map(id => ({ id, ...visible(s, t, id) })).filter(x => x.row).map(x => ({ ...x.row, src: x.src }));
+}
+
+/* ============================================================================
+   2. SQL — a deliberately tiny dialect.
+   ========================================================================= */
+function parseWhere(w) {
+  if (!w) return () => true;
+  const m = /^(id|balance|name)\s*(=|>=|<=|>|<|!=)\s*'?(\w+)'?$/i.exec(w.trim());
+  if (!m) throw new Error(`can't parse WHERE ${w} (use: id = 1, balance > 700, name = 'bob')`);
+  const [, col, op, raw] = m; const val = col === "name" ? raw : +raw;
+  const ops = { "=": (a, b) => a === b, "!=": (a, b) => a !== b, ">": (a, b) => a > b, "<": (a, b) => a < b, ">=": (a, b) => a >= b, "<=": (a, b) => a <= b };
+  return r => ops[op](r[col.toLowerCase()], val);
+}
+function parseSql(sql) {
+  const q = sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
+  let m;
+  if (/^begin$/i.test(q)) return { kind: "begin" };
+  if (/^commit$/i.test(q)) return { kind: "commit" };
+  if (/^(rollback|abort)$/i.test(q)) return { kind: "rollback" };
+  if ((m = /^select (.+?) from accounts(?: where (.+))?$/i.exec(q)))
+    return { kind: "select", cols: m[1].trim().toLowerCase(), where: m[2] || null, pred: parseWhere(m[2]) };
+  if ((m = /^update accounts set balance = (.+?) where (.+)$/i.exec(q))) {
+    const e = /^(?:balance\s*([+-])\s*)?(\d+)$/i.exec(m[1].trim());
+    if (!e) throw new Error("SET balance = <number> | balance + N | balance - N");
+    return { kind: "update", expr: e[1] ? { op: e[1], n: +e[2] } : { set: +e[2] }, where: m[2], pred: parseWhere(m[2]), text: m[1].trim() };
+  }
+  if ((m = /^insert into accounts values \( ?(\d+) ?, ?'?(\w+)'? ?, ?(\d+) ?\)$/i.exec(q)))
+    return { kind: "insert", row: { id: +m[1], name: m[2], balance: +m[3] } };
+  if ((m = /^delete from accounts where (.+)$/i.exec(q)))
+    return { kind: "delete", where: m[1], pred: parseWhere(m[1]) };
+  throw new Error(`unsupported statement: ${q}`);
+}
+
+/* ============================================================================
+   3. THE ENGINE — run one statement for one transaction. Mutates n.
+   Returns {lines:[{text,cls}], entry:{sql,res,cls,badges}} for the logs.
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fmtRow = r => `${r.id}  ${r.name.padEnd(6)} ${String(r.balance).padStart(5)}`;
+
+function ensureBegun(n, t) {
+  if (isActive(t)) return null;
+  t.status = "active"; t.level = n.level; t.start = n.seq; t.writes = {}; t.seen = {}; t.reads = []; t.log = []; t.pending = null;
+  t.snapshot = t.level === "serializable" ? structuredClone(n.table) : null;
+  return line(`${t.id.toUpperCase()} began (${t.level})${t.snapshot ? " — snapshot taken" : ""}`, "dim");
+}
+
+function exec(n, t, sql, resumed = false) {
+  const lines = [], out = { sql, res: "", cls: "", badges: [] };
+  let st;
+  try { st = parseSql(sql); } catch (e) { return { error: true, lines: [line(e.message, "err")] }; }
+  const T = t.id.toUpperCase(), o = n.txns[other(t.id)];
+
+  if (t.status === "waiting" && !resumed) return { error: true, lines: [line(`${T} is blocked waiting for ${other(t.id).toUpperCase()} — commit or roll that one back first`, "err")] };
+
+  if (st.kind === "begin") {
+    if (isActive(t)) return { error: true, lines: [line(`${T} is already in a transaction`, "err")] };
+    lines.push(ensureBegun(n, t)); n.seq++;
+    t.log.push({ sql, res: "", cls: "" });
+    return { lines };
+  }
+  if (st.kind === "commit" || st.kind === "rollback") {
+    if (!isActive(t)) return { error: true, lines: [line(`${T} has no transaction open`, "err")] };
+    n.seq++;
+    if (st.kind === "commit") {
+      /* serializable: first committer wins on anything we read */
+      if (t.level === "serializable") {
+        const touched = Object.entries(n.table).filter(([id, r]) => r.v > t.start).map(([id]) => +id);
+        const conflict = touched.find(id => t.reads.some(r => r.id === id) || t.reads.some(r => r.predText && parseWhere(r.predText)(n.table[id])));
+        if (conflict !== undefined) {
+          t.status = "aborted"; t.writes = {}; t.pending = null;
+          t.log.push({ sql, res: `ERROR: could not serialize access — row ${conflict} changed under us`, cls: "err", badges: ["serial"] });
+          lines.push(line(`ERROR: could not serialize access due to read/write dependencies among transactions`, "err"),
+                     line(`${T} rolled back. Nothing it did happened. Retry it and it will see the new data.`, "dim"));
+          wake(n, o, lines);
+          return { lines };
+        }
+      }
+      const changed = Object.keys(t.writes);
+      for (const [id, row] of Object.entries(t.writes)) { if (row) n.table[id] = { ...row, v: n.seq }; else delete n.table[id]; }
+      t.status = "committed"; t.writes = {};
+      t.log.push({ sql, res: changed.length ? `${changed.length} row(s) now visible to everyone` : "nothing to write", cls: "" });
+      lines.push(line(`${T} committed${changed.length ? ` — rows ${changed.join(", ")} are now the truth` : ""}`, "add"));
+    } else {
+      const had = Object.keys(t.writes).length;
+      t.status = "aborted"; t.writes = {};
+      t.log.push({ sql, res: had ? `${had} uncommitted write(s) discarded` : "", cls: "" });
+      lines.push(line(`${T} rolled back${had ? ` — its ${had} write(s) never existed` : ""}`, "mod"));
+    }
+    t.pending = null;
+    wake(n, o, lines);
+    return { lines };
+  }
+
+  const began = ensureBegun(n, t); if (began) lines.push(began);
+  if (!resumed) n.seq++;
+
+  if (st.kind === "select") {
+    const rows = candidateIds(n, t).map(id => ({ id, ...visible(n, t, id) })).filter(x => x.row && st.pred(x.row));
+    /* remember versions for repeatable read */
+    if (t.level === "repeatable read") rows.forEach(x => { if (!(x.id in t.seen)) t.seen[x.id] = { ...x.row }; });
+    /* anomaly detection against this transaction's own read log */
+    rows.forEach(x => {
+      if (x.src === "dirty") out.badges.push("dirty");
+      const earlier = t.reads.find(r => r.id === x.id && r.balance !== undefined);
+      if (earlier && earlier.balance !== x.row.balance && !out.badges.includes("nonrep")) out.badges.push("nonrep");
+    });
+    if (st.where) {
+      const earlier = t.reads.find(r => r.predText === st.where && r.ids);
+      const ids = rows.map(x => x.id).join(",");
+      if (earlier && earlier.ids !== ids) out.badges.push("phantom");
+      t.reads.push({ predText: st.where, ids });
+    }
+    rows.forEach(x => t.reads.push({ id: x.id, balance: x.row.balance }));
+    let res;
+    if (st.cols === "count(*)") res = `count = ${rows.length}`;
+    else if (st.cols === "sum(balance)") res = `sum = ${rows.reduce((a, x) => a + x.row.balance, 0)}`;
+    else if (st.cols === "balance") res = rows.map(x => `${x.row.balance}`).join(", ") || "(no rows)";
+    else res = rows.map(x => fmtRow(x.row)).join("\n") || "(no rows)";
+    const srcs = [...new Set(rows.map(x => x.src))];
+    out.res = res; out.src = srcs;
+    t.log.push(out);
+    lines.push(...res.split("\n").map(l => line(l, out.badges.includes("dirty") ? "mod" : "ok")));
+    const why = { dirty: "read an uncommitted write from " + other(t.id).toUpperCase(),
+                  nonrep: "same row read earlier in this transaction with a different value",
+                  phantom: "same WHERE clause read earlier in this transaction returned different rows" };
+    out.badges.forEach(b => lines.push(line(`⚠ ${b === "nonrep" ? "non-repeatable read" : b + " read"}: ${why[b]}`, b === "phantom" ? "ph" : b === "dirty" ? "err" : "mod")));
+    if (srcs.includes("seen")) lines.push(line("(repeatable read: returning the version this transaction saw first)", "dim"));
+    if (srcs.includes("snapshot")) lines.push(line("(serializable: reading from this transaction's snapshot)", "dim"));
+    return { lines };
+  }
+
+  if (st.kind === "update" || st.kind === "delete") {
+    const targets = Object.keys(n.table).map(Number).filter(id => (id in t.writes ? t.writes[id] : n.table[id]) && st.pred(id in t.writes ? t.writes[id] : n.table[id]));
+    Object.keys(t.writes).map(Number).forEach(id => { if (!(id in n.table) && t.writes[id] && st.pred(t.writes[id]) && !targets.includes(id)) targets.push(id); });
+    if (!targets.length) { t.log.push({ sql, res: "0 rows", cls: "" }); lines.push(line("UPDATE 0", "dim")); return { lines }; }
+    /* write/write conflict: the other transaction holds the row */
+    const locked = targets.find(id => isActive(o) && id in o.writes);
+    if (locked !== undefined) {
+      t.status = "waiting"; t.pending = sql;
+      if (!resumed) t.log.push({ sql, res: `waiting… row ${locked} is locked by ${other(t.id).toUpperCase()}`, cls: "wait" });
+      lines.push(line(`${T} blocks: row ${locked} has an uncommitted write from ${other(t.id).toUpperCase()}. It will resume when ${other(t.id).toUpperCase()} commits or rolls back.`, "mod"));
+      return { lines };
+    }
+    /* snapshot levels refuse to overwrite a row that changed since they started */
+    if ((t.level === "repeatable read" || t.level === "serializable")) {
+      const stale = targets.find(id => n.table[id] && n.table[id].v > t.start);
+      if (stale !== undefined) {
+        t.status = "aborted"; t.writes = {}; t.pending = null;
+        t.log.push({ sql, res: `ERROR: could not serialize access due to concurrent update (row ${stale})`, cls: "err", badges: ["serial"] });
+        lines.push(line(`ERROR: could not serialize access due to concurrent update`, "err"),
+                   line(`row ${stale} was committed by someone else after ${T} started. ${T} is rolled back — retry it and it will see the new value.`, "dim"));
+        wake(n, o, lines);
+        return { lines };
+      }
+    }
+    targets.forEach(id => {
+      const base = id in t.writes ? t.writes[id] : n.table[id];
+      if (st.kind === "delete") { t.writes[id] = null; return; }
+      const nb = st.expr.set !== undefined ? st.expr.set : (st.expr.op === "+" ? base.balance + st.expr.n : base.balance - st.expr.n);
+      t.writes[id] = { ...base, balance: nb };
+    });
+    const res = `${st.kind === "delete" ? "DELETE" : "UPDATE"} ${targets.length}` + (st.kind === "update" ? `  →  ${targets.map(id => `${id}: ${t.writes[id].balance}`).join(", ")}` : "");
+    if (resumed) { const e = t.log[t.log.length - 1]; e.res = res + " (resumed)"; e.cls = ""; } else t.log.push({ sql, res, cls: "" });
+    lines.push(line(res, "mod"), line(`private to ${T} until commit. Row${targets.length > 1 ? "s" : ""} ${targets.join(", ")} now locked against other writers.`, "dim"));
+    return { lines };
+  }
+
+  if (st.kind === "insert") {
+    const id = st.row.id;
+    if (n.table[id] || t.writes[id] || (isActive(o) && o.writes[id])) return { error: true, lines: [line(`ERROR: duplicate key value violates unique constraint (id ${id})`, "err")] };
+    t.writes[id] = { ...st.row };
+    t.log.push({ sql, res: "INSERT 1", cls: "" });
+    lines.push(line("INSERT 1", "mod"), line(`private to ${T} until commit`, "dim"));
+    return { lines };
+  }
+}
+
+/* A transaction that was blocked on `o` gets to try its statement again. */
+function wake(n, waiter, lines) {
+  if (waiter.status !== "waiting" || !waiter.pending) return;
+  waiter.status = "active";
+  lines.push(line(`${waiter.id.toUpperCase()} unblocked — retrying: ${waiter.pending}`, "dim"));
+  const r = exec(n, waiter, waiter.pending, true);
+  lines.push(...r.lines);
+  if (waiter.status !== "waiting") waiter.pending = null;
+}
+
+/* ============================================================================
+   4. COMMANDS
+   ========================================================================= */
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const txnCmd = id => (s, args, raw) => {
+  const sql = raw.trim().replace(/^t[12]\s*/i, "");
+  if (!sql) return fail(`usage: ${id} <sql>`);
+  const n = clone(s);
+  const r = exec(n, n.txns[id], sql);
+  if (r.error) return { error: true, out: r.lines };
+  return { state: n, out: r.lines };
+};
+
+const REGISTRY = {
+  "t1": txnCmd("t1"),
+  "t2": txnCmd("t2"),
+  "isolation": (s, args, raw) => {
+    const lv = raw.trim().replace(/^isolation\s*/i, "").toLowerCase().replace(/\s+/g, " ");
+    if (!LEVELS.includes(lv)) return fail(`isolation level must be one of: ${LEVELS.join(" · ")}`);
+    const n = clone(s); n.level = lv;
+    const open = Object.values(n.txns).filter(isActive).map(t => t.id.toUpperCase());
+    return { state: n, out: [line(`new transactions will run at ${lv}`, "mod"),
+      line(open.length ? `${open.join(" and ")} keep the level they started with` : "applies to the next begin", "dim")] };
+  },
+  "show": s => ({ out: [line("id  name    balance  v", "dim"), ...Object.values(s.table).map(r => line(fmtRow(r) + `   ${r.v}`))] }),
+  "help": () => ({ out: [
+    line("t1 <sql> · t2 <sql>            run a statement as that transaction (begins it if needed)", "ok"),
+    line("  select * | balance | count(*) | sum(balance) from accounts [where col op val]", "ok"),
+    line("  update accounts set balance = N | balance + N | balance - N where ...", "ok"),
+    line("  insert into accounts values (3, 'carol', 800)  ·  delete from accounts where ...", "ok"),
+    line("  begin · commit · rollback", "ok"),
+    line("isolation <level>              read uncommitted | read committed | repeatable read | serializable", "mod"),
+    line("show · restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+
+/* ============================================================================
+   5. PARSER — first word picks the reducer; SQL gets the raw string.
+   ========================================================================= */
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase();
+  if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1), raw);
+  return fail(`${w}: not a command — prefix SQL with t1 or t2, or try 'help'`);
+}
+
+/* ============================================================================
+   6. RENDERER
+   ========================================================================= */
+let prevTable = null, prevLogLen = { t1: 0, t2: 0 };
+const badgeName = { dirty: "dirty read", nonrep: "non-repeatable", phantom: "phantom", serial: "serialization failure" };
+
+function render(s) {
+  d3.selectAll("#levels .lv").classed("on", function () { return this.dataset.l === s.level; });
+
+  /* committed table with uncommitted ghosts */
+  const rows = [];
+  Object.values(s.table).sort((a, b) => a.id - b.id).forEach(r => {
+    rows.push({ key: "c" + r.id, cls: "", ...r });
+    ["t1", "t2"].forEach(tid => {
+      const t = s.txns[tid];
+      if (isActive(t) && r.id in t.writes) {
+        const w = t.writes[r.id];
+        rows.push(w ? { key: tid + r.id, cls: "ghost " + tid, ...w, owner: tid } : { key: tid + r.id, cls: "ghost gone " + tid, ...r, owner: tid });
+      }
+    });
+  });
+  ["t1", "t2"].forEach(tid => {
+    const t = s.txns[tid];
+    if (isActive(t)) Object.entries(t.writes).forEach(([id, w]) => { if (w && !(id in s.table)) rows.push({ key: tid + id, cls: "ghost " + tid, ...w, owner: tid }); });
+  });
+  const tr = d3.select("#rows").selectAll("tr").data(rows, d => d.key);
+  tr.exit().remove();
+  const te = tr.enter().append("tr");
+  te.append("td"); te.append("td"); te.append("td").attr("class", "num");
+  const tm = te.merge(tr).order().attr("class", d => d.cls || null);
+  tm.select("td:nth-child(1)").text(d => d.id);
+  tm.select("td:nth-child(2)").text(d => d.name + (d.owner ? `  (${d.owner.toUpperCase()}, uncommitted)` : ""));
+  tm.select("td:nth-child(3)").text(d => d.balance).each(function (d) {
+    if (prevTable && !d.owner && prevTable.get(d.id) !== undefined && prevTable.get(d.id) !== d.balance) { this.classList.add("flash"); setTimeout(() => this.classList.remove("flash"), 900); }
+  });
+  prevTable = new Map(Object.values(s.table).map(r => [r.id, r.balance]));
+  d3.select("#ver").text(`seq ${s.seq}`);
+  const ghosts = rows.filter(r => r.owner).length;
+  d3.select("#tblnote").text(ghosts ? `${ghosts} uncommitted change(s) hovering — only visible to their owner (and to anyone at read uncommitted)` : "everything here is committed and visible to all");
+
+  /* the two transactions */
+  ["t1", "t2"].forEach(tid => {
+    const t = s.txns[tid], box = d3.select("#" + tid);
+    box.attr("class", `box tx ${tid} ${t.status}`);
+    box.select(".cap .st").text(t.status === "idle" ? "idle" : `${t.status} · ${t.level}${t.status === "waiting" ? " · blocked" : ""}`);
+    const st = box.select(".stmts").selectAll("div.stmt").data(t.log.map((e, i) => ({ ...e, i })), d => d.i);
+    st.exit().remove();
+    const se = st.enter().append("div").attr("class", "stmt");
+    se.append("div").attr("class", "sql"); se.append("div").attr("class", "res");
+    const sm = se.merge(st).order();
+    sm.select(".sql").html(d => `${esc(d.sql)}${(d.badges || []).map(b => `<span class="badge ${b}">${badgeName[b]}</span>`).join("")}`);
+    sm.select(".res").attr("class", d => "res " + (d.cls || "")).text(d => d.res);
+    se.classed("flash", true).transition().delay(700).on("end", function () { d3.select(this).classed("flash", false); });
+    box.select(".stmts").selectAll("div.none").data(t.log.length ? [] : [0]).join("div").attr("class", "none").text("no statements yet");
+    /* what it sees */
+    const v = viewOf(s, t);
+    const vr = box.select(".view tbody").selectAll("tr").data(v, d => d.id);
+    vr.exit().remove();
+    const ve = vr.enter().append("tr");
+    ve.append("td"); ve.append("td"); ve.append("td").attr("class", "num");
+    const vm = ve.merge(vr).order().attr("class", d => d.src === "dirty" ? "dirtyv" : d.src === "seen" || d.src === "snapshot" ? "stale" : null)
+      .attr("title", d => ({ own: "its own uncommitted write", dirty: "another transaction's uncommitted write", seen: "the version it read first (repeatable read)", snapshot: "from its snapshot", committed: "committed" })[d.src]);
+    vm.select("td:nth-child(1)").text(d => d.id);
+    vm.select("td:nth-child(2)").text(d => d.name);
+    vm.select("td:nth-child(3)").text(d => d.balance + (d.src === "own" ? " *" : d.src === "dirty" ? " !" : d.src === "seen" || d.src === "snapshot" ? " ~" : ""));
+  });
+}
+const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+/* ============================================================================
+   7. LESSON
+   ========================================================================= */
+const T1 = s => s.txns.t1, T2 = s => s.txns.t2;
+const idle = s => !isActive(T1(s)) && !isActive(T2(s));
+const bal = (s, id) => s.table[id]?.balance;
+
+const LESSON = [
+  { title: "One table, two transactions",
+    body: `Alice has 1000, Bob has 500. The middle column is the committed truth. Each side
+    column is a transaction: what it ran, what it got, and — at the bottom — what the table
+    looks like <em>from its point of view</em>. Those three views are about to disagree.`,
+    try: "show", expect: /^show/, readonly: true },
+
+  { title: "Level 0: read uncommitted",
+    body: `The weakest level. A reader is allowed to see rows another transaction has written
+    but not yet committed. Almost no database actually offers this (Postgres silently
+    upgrades it), but it's the clearest way to see what the other levels are for.`,
+    try: "isolation read uncommitted", expect: /^isolation read uncommitted/,
+    needs: s => idle(s) && s.level !== "read uncommitted" },
+
+  { title: "T1 changes something, doesn't commit",
+    body: `T1 begins implicitly and debits Alice. Look at the middle: the committed row still
+    says 1000, and an amber ghost row says 900. Look at T1's view: 900. T1 also now holds a
+    lock on that row; no one else can write it until T1 finishes.`,
+    try: "t1 update accounts set balance = balance - 100 where id = 1", expect: /^t1 update/,
+    needs: s => idle(s) && s.level === "read uncommitted" && bal(s, 1) === 1000 },
+
+  { title: "T2 reads it: a dirty read",
+    body: `T2 sees 900 — a number that exists only in T1's private workspace. If T2 acts on it
+    (sends an email, computes a total) it has acted on something that may never become true.`,
+    try: "t2 select balance from accounts where id = 1", expect: /^t2 select/,
+    needs: s => isActive(T1(s)) && 1 in T1(s).writes && !isActive(T2(s)) && s.level === "read uncommitted" },
+
+  { title: "T1 rolls back",
+    body: `The 900 is gone as if it had never existed — because it never did. T2 has already
+    read it. That's the whole danger in one move.`,
+    try: "t1 rollback", expect: /^t1 rollback/,
+    needs: s => isActive(T1(s)) && isActive(T2(s)) && 1 in T1(s).writes },
+
+  { title: "T2 reads again",
+    body: `Back to 1000. Within one transaction T2 has now seen two different balances for the
+    same row, one of which was fiction. Both badges fire.`,
+    try: "t2 select balance from accounts where id = 1", expect: /^t2 select/,
+    needs: s => !isActive(T1(s)) && isActive(T2(s)) && T2(s).level === "read uncommitted" },
+
+  { title: "Close T2",
+    body: `Finish the transaction so the next one can start at a stronger level. Isolation is
+    fixed when a transaction begins.`,
+    try: "t2 commit", expect: /^t2 (commit|rollback)/,
+    needs: s => isActive(T2(s)) },
+
+  { title: "Level 1: read committed",
+    body: `The default in Postgres, Oracle, SQL Server. Rule: you only ever see data that has
+    been committed. Dirty reads become impossible. But "committed" is evaluated per
+    <em>statement</em>, not per transaction — keep that in mind.`,
+    try: "isolation read committed", expect: /^isolation read committed/,
+    needs: s => idle(s) && s.level !== "read committed" },
+
+  { title: "T1 debits Alice again",
+    body: `Same update as before. Same amber ghost in the middle.`,
+    try: "t1 update accounts set balance = balance - 100 where id = 1", expect: /^t1 update/,
+    needs: s => idle(s) && s.level === "read committed" && bal(s, 1) === 1000 },
+
+  { title: "T2 reads: no dirty read",
+    body: `T2 sees 1000, the committed value. T1's 900 is invisible to it. Level 1 delivers
+    exactly what it promised.`,
+    try: "t2 select balance from accounts where id = 1", expect: /^t2 select/,
+    needs: s => isActive(T1(s)) && 1 in T1(s).writes && !isActive(T2(s)) && s.level === "read committed" },
+
+  { title: "T1 commits",
+    body: `Now 900 is the truth. T2 is still open and has 1000 in its notes.`,
+    try: "t1 commit", expect: /^t1 commit/,
+    needs: s => isActive(T1(s)) && isActive(T2(s)) && 1 in T1(s).writes },
+
+  { title: "T2 reads again: non-repeatable",
+    body: `Same query, same transaction, different answer: 900. Nothing was dirty — every value
+    T2 saw was committed at the moment it looked. But a transaction that reads a balance,
+    thinks, and reads it again can't rely on the two matching.`,
+    try: "t2 select balance from accounts where id = 1", expect: /^t2 select/,
+    needs: s => !isActive(T1(s)) && isActive(T2(s)) && T2(s).level === "read committed" && T2(s).reads.some(r => r.id === 1) },
+
+  { title: "Close T2",
+    body: `On to the next level.`,
+    try: "t2 commit", expect: /^t2 (commit|rollback)/,
+    needs: s => isActive(T2(s)) },
+
+  { title: "Level 2: repeatable read",
+    body: `Rule: once a transaction has read a row, it keeps seeing that same version until it
+    ends, no matter who commits. (The SQL standard's definition; Postgres and MySQL go
+    further and freeze the whole table into a snapshot.)`,
+    try: "isolation repeatable read", expect: /^isolation repeatable read/,
+    needs: s => idle(s) && s.level !== "repeatable read" },
+
+  { title: "T2 reads everyone over 700",
+    body: `Just Alice, at 900. T2 has now "seen" row 1 and will hold onto that version.`,
+    try: "t2 select * from accounts where balance > 700", expect: /^t2 select/,
+    needs: s => idle(s) && s.level === "repeatable read" && bal(s, 1) === 900 },
+
+  { title: "T1 debits Alice and commits",
+    body: `Two statements in one go on T1's side: update, then commit. The committed balance
+    becomes 800.`,
+    try: "t1 update accounts set balance = balance - 100 where id = 1", expect: /^t1 update/,
+    needs: s => isActive(T2(s)) && !isActive(T1(s)) && 1 in T2(s).seen },
+
+  { title: "…commit",
+    body: `Committed. Middle column says 800.`,
+    try: "t1 commit", expect: /^t1 commit/,
+    needs: s => isActive(T1(s)) && 1 in T1(s).writes },
+
+  { title: "T2 reads Alice: still 900",
+    body: `The read is repeatable: T2 gets the version it saw first, even though the truth
+    moved on. Non-repeatable reads are gone. T2's view of Alice is now knowingly stale —
+    hover the ~ in its view.`,
+    try: "t2 select balance from accounts where id = 1", expect: /^t2 select/,
+    needs: s => !isActive(T1(s)) && isActive(T2(s)) && T2(s).level === "repeatable read" && bal(s, 1) === 800 },
+
+  { title: "T1 inserts a new rich customer",
+    body: `Carol, 800. This is a row T2 has never seen, so it holds no version of it.`,
+    try: "t1 insert into accounts values (3, 'carol', 800)", expect: /^t1 insert/,
+    needs: s => !isActive(T1(s)) && isActive(T2(s)) && !(3 in s.table) },
+
+  { title: "…commit",
+    body: `Carol is now real.`,
+    try: "t1 commit", expect: /^t1 commit/,
+    needs: s => isActive(T1(s)) && 3 in T1(s).writes },
+
+  { title: "T2 repeats its first query: a phantom",
+    body: `"Everyone over 700" now returns Alice <em>and</em> Carol. Every row T2 saw before is
+    unchanged, so this isn't a non-repeatable read. It's a row that appeared out of nowhere:
+    a phantom. Row-level guarantees can't stop it, because there was no row to guarantee.`,
+    try: "t2 select * from accounts where balance > 700", expect: /^t2 select \*/,
+    needs: s => !isActive(T1(s)) && isActive(T2(s)) && 3 in s.table && T2(s).level === "repeatable read" },
+
+  { title: "Close T2",
+    body: `Last level.`,
+    try: "t2 commit", expect: /^t2 (commit|rollback)/,
+    needs: s => isActive(T2(s)) },
+
+  { title: "Level 3: serializable",
+    body: `Rule: the outcome must equal <em>some</em> one-at-a-time ordering of the transactions.
+    Each transaction reads from a snapshot taken when it started (so phantoms are gone too),
+    and if two of them touch the same data in a way no serial order could explain, the
+    database refuses one of them.`,
+    try: "isolation serializable", expect: /^isolation serializable/,
+    needs: s => idle(s) && s.level !== "serializable" },
+
+  { title: "Two withdrawals: T1 reads Alice",
+    body: `The classic lost-update setup. Alice has 800. T1 reads it, planning to subtract 100
+    in application code.`,
+    try: "t1 select balance from accounts where id = 1", expect: /^t1 select/,
+    needs: s => idle(s) && s.level === "serializable" && bal(s, 1) === 800 },
+
+  { title: "T2 reads Alice too",
+    body: `Also 800. Also planning to subtract 100. At read committed this story ends with the
+    balance at 700 and one withdrawal silently vanished.`,
+    try: "t2 select balance from accounts where id = 1", expect: /^t2 select/,
+    needs: s => isActive(T1(s)) && !isActive(T2(s)) && s.level === "serializable" },
+
+  { title: "T1 writes its answer",
+    body: `800 − 100 = 700, written as a literal. Private to T1 for now.`,
+    try: "t1 update accounts set balance = 700 where id = 1", expect: /^t1 update/,
+    needs: s => isActive(T1(s)) && isActive(T2(s)) && !Object.keys(T1(s).writes).length },
+
+  { title: "T1 commits",
+    body: `Truth is now 700. T2's snapshot still says 800, and T2 still intends to write 700.`,
+    try: "t1 commit", expect: /^t1 commit/,
+    needs: s => isActive(T1(s)) && 1 in T1(s).writes },
+
+  { title: "T2 writes: refused",
+    body: `T2 tries to overwrite a row that changed after its snapshot. No serial order of T1
+    then T2 could produce that, so the database aborts T2 with a serialization failure.
+    That's not a bug; it's the level working. The application retries T2, which now reads
+    700 and writes 600. Nothing is lost.`,
+    try: "t2 update accounts set balance = 700 where id = 1", expect: /^t2 update/,
+    needs: s => !isActive(T1(s)) && isActive(T2(s)) && T2(s).level === "serializable" && bal(s, 1) === 700 },
+
+  { title: "Free play",
+    body: `<code>help</code> lists the dialect. Try the lost update at read committed to see it
+    actually get lost, or two updates to the same row to watch one transaction block. Every
+    level is a trade: this much truth for this much concurrency.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   8. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, /^t1/i.test(raw.trim()) ? "cmd c1" : /^t2/i.test(raw.trim()) ? "cmd c2" : "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.querySelectorAll("#levels .lv").forEach(el => el.onclick = () => run("isolation " + el.dataset.l));
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Transactions sandbox loaded. Type 'help' for the dialect.", "dim");
+</script>
+</body>
+</html>

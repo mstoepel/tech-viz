@@ -87,9 +87,10 @@ const VIZ = [
   { topic: "k8s", path: "k8s/reconciliation.html", title: "Reconciliation",
     blurb: `Desired state, observed state, and the loops that close the gap. Kill a pod,
             lose a node, scale, roll out, roll back, and watch the same loops fix it all.` },
-  { topic: "db", status: "planned", title: "Transactions and isolation",
-    blurb: `Two transactions, one table. Interleave statements by hand and watch dirty
-            reads, non-repeatable reads and phantoms appear as the isolation level drops.` },
+  { topic: "db", path: "db/transactions.html", title: "Transactions and isolation",
+    blurb: `Two transactions, one table. Interleave statements by hand and watch dirty reads,
+            non-repeatable reads, phantoms and lost updates appear, then disappear, one
+            isolation level at a time.` },
   { topic: "ml", status: "planned", title: "Diffusion models",
     blurb: `Adding noise forward, learning to remove it backward.` }
 ];

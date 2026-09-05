@@ -13,8 +13,9 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 | 03 | Git | [git/remotes.html](git/remotes.html) | Local vs origin, why `origin/main` is stale until fetch, rejected push, pull as fetch+merge or rebase, force push |
 | 01 | Docker | [docker/layers.html](docker/layers.html) | Content-addressed layers, cache invalidation, Dockerfile ordering, copy-on-write, prune |
 | 01 | Kubernetes | [k8s/reconciliation.html](k8s/reconciliation.html) | kubectl writes desired state; controllers run per tick and close the gap: self-healing, scaling, node loss, rolling update, undo, garbage collection |
+| 01 | Databases | [db/transactions.html](db/transactions.html) | Two interleaved transactions; dirty, non-repeatable and phantom reads, row locks, and a serialization failure, one isolation level at a time |
 
-Planned: database transactions and isolation levels. Later: diffusion models.
+Planned: diffusion models.
 
 ## Conventions
 
