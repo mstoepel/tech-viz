@@ -50,34 +50,60 @@ footer a{color:var(--ink-dim)}
   <p class="standfirst">Interactive sandboxes for ideas that resist prose. Each one is a
   single page: type real commands, watch the model move.</p>
 
-  <h2>Git internals</h2>
-  <div class="cards">
-    <a class="card" href="git/three-trees.html">
-      <div class="no">SANDBOX 01</div>
-      <div class="t">The Three Trees</div>
-      <p class="d">Working directory, index, HEAD. Why <code>add</code>, <code>restore</code>
-      and the three flavours of <code>reset</code> are all the same move.</p>
-    </a>
-    <a class="card" href="git/branching.html">
-      <div class="no">SANDBOX 02</div>
-      <div class="t">Branches are pointers</div>
-      <p class="d">A branch is a file holding one commit id. Fast-forward, merge commits,
-      rebase and detached HEAD, watched at the level of which files get rewritten.</p>
-    </a>
-  </div>
-
-  <h2>On the list</h2>
-  <div class="cards">
-    <a class="card soon"><div class="no">CONTAINERS</div><div class="t">Docker image layers</div>
-      <p class="d">Copy-on-write, layer caching, and why ordering your Dockerfile matters.</p></a>
-    <a class="card soon"><div class="no">ORCHESTRATION</div><div class="t">Kubernetes reconciliation</div>
-      <p class="d">Desired state, observed state, and the controllers that close the gap.</p></a>
-    <a class="card soon"><div class="no">ML</div><div class="t">Diffusion models</div>
-      <p class="d">Adding noise forward, learning to remove it backward.</p></a>
-  </div>
+  <div id="catalogue"><noscript>Enable JavaScript to see the list, or browse the folders on GitHub.</noscript></div>
 
   <footer>Source on <a href="https://github.com/mstoepel/tech-viz">GitHub</a>.
   Built with D3; no build step, every page is self-contained.</footer>
 </div>
+
+<script>
+/* ============================================================================
+   CATALOGUE — data. To add a visualisation, add one entry to VIZ. To add a
+   topic, add one entry to TOPICS. Sections render in TOPICS order; cards
+   render in VIZ order and are numbered within their topic (live ones only).
+   `path` omitted or `status: "planned"` → dimmed, unlinked placeholder.
+   ========================================================================= */
+const TOPICS = [
+  { id: "git",    title: "Git internals" },
+  { id: "docker", title: "Containers" },
+  { id: "k8s",    title: "Orchestration" },
+  { id: "ml",     title: "Machine learning" }
+];
+
+const VIZ = [
+  { topic: "git", path: "git/three-trees.html", title: "The Three Trees",
+    blurb: `Working directory, index, HEAD. Why <code>add</code>, <code>restore</code>
+            and the three flavours of <code>reset</code> are all the same move.` },
+  { topic: "git", path: "git/branching.html", title: "Branches are pointers",
+    blurb: `A branch is a file holding one commit id. Fast-forward, merge commits,
+            rebase and detached HEAD, watched at the level of which files get rewritten.` },
+  { topic: "docker", status: "planned", title: "Docker image layers",
+    blurb: `Copy-on-write, layer caching, and why ordering your Dockerfile matters.` },
+  { topic: "k8s", status: "planned", title: "Kubernetes reconciliation",
+    blurb: `Desired state, observed state, and the controllers that close the gap.` },
+  { topic: "ml", status: "planned", title: "Diffusion models",
+    blurb: `Adding noise forward, learning to remove it backward.` }
+];
+
+/* --------------------------------------------------------------------------- */
+const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const isLive = v => v.path && v.status !== "planned";
+
+function card(v, n) {
+  const live = isLive(v);
+  const label = live ? `SANDBOX ${String(n).padStart(2, "0")}` : "PLANNED";
+  const open = live ? `<a class="card" href="${esc(v.path)}">` : `<a class="card soon" aria-disabled="true">`;
+  return `${open}<div class="no">${label}</div><div class="t">${esc(v.title)}</div>
+          <p class="d">${v.blurb}</p></a>`;
+}
+
+document.getElementById("catalogue").innerHTML = TOPICS.map(t => {
+  const items = VIZ.filter(v => v.topic === t.id);
+  if (!items.length) return "";
+  let n = 0;
+  const cards = items.map(v => card(v, isLive(v) ? ++n : 0)).join("");
+  return `<h2>${esc(t.title)}</h2><div class="cards">${cards}</div>`;
+}).join("");
+</script>
 </body>
 </html>

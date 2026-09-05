@@ -18,6 +18,9 @@ Planned: Docker image layers, Kubernetes reconciliation, diffusion models.
 - **One folder per topic, one self-contained HTML file per concept.** No build step,
   no bundler. D3 and fonts load from CDN; everything else is inline. Open the file in a
   browser and it works.
+- **The index is a manifest.** `index.html` renders from two arrays, `TOPICS` and `VIZ`.
+  Adding a visualisation is one entry in `VIZ`; adding a topic is one entry in `TOPICS`.
+  Entries without a `path` (or with `status: "planned"`) render as dimmed placeholders.
 - **Sandbox, not slideshow.** Each page has a terminal where the learner types real
   commands. A guided lesson sits on top, but the whole command registry is always open.
 - **Engine shape.** Every sandbox is four separable parts: an immutable `state`, a registry
