@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The agent loop — an AI sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Roles get colours because the context window is the signature: cyan for
+   the user, purple for the model, amber for tools (calls and results), green
+   for a compaction summary, faint for the system prompt. The loop diagram
+   lights whichever node acted last in amber.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --user:#5cc8d6; --model:#b08be8; --tool:#e8a33d; --sum:#6fbf73; --bad:#e06c6c; --hot:#e8a33d;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--model)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--model);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--model);color:var(--model)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--model);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the context window as a stack that only ever grows (until
+   you compact it), the loop as four boxes with one lit, and the registry of
+   tools plus the memory store on the right — the two things that exist
+   *outside* the context.
+   ========================================================================= */
+.stage{display:grid;grid-template-columns:1fr 260px 250px;gap:12px;align-items:start}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.meter{padding:8px 12px;border-bottom:1px solid var(--line)}
+.meter .bar{height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden}
+.meter .bar i{display:block;height:100%;background:var(--sum);transition:width .4s,background .4s}
+.meter.warn .bar i{background:var(--tool)} .meter.full .bar i{background:var(--bad)}
+.meter .lbl{font-family:var(--code);font-size:10.5px;color:var(--ink-faint);margin-top:4px;display:flex;justify-content:space-between}
+.ctx{padding:10px 12px;display:flex;flex-direction:column;gap:6px;max-height:520px;overflow-y:auto}
+.msg{border:1px solid var(--line);border-left-width:3px;border-radius:var(--r);padding:6px 9px;background:var(--bg);
+  animation:pop .3s ease-out}
+.msg .h{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;display:flex;justify-content:space-between;color:var(--ink-faint);margin-bottom:2px}
+.msg .b{font-family:var(--code);font-size:11.5px;color:var(--ink-dim);white-space:pre-wrap;word-break:break-word;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.msg.open .b{-webkit-line-clamp:unset}
+.msg .tb{height:2px;background:var(--line);margin-top:5px;border-radius:1px}
+.msg .tb i{display:block;height:100%;background:currentColor;opacity:.5}
+.msg.system{border-left-color:var(--ink-faint);color:var(--ink-faint)}
+.msg.user{border-left-color:var(--user);color:var(--user)}
+.msg.assistant{border-left-color:var(--model);color:var(--model)}
+.msg.call{border-left-color:var(--tool);color:var(--tool)}
+.msg.tool{border-left-color:var(--tool);color:var(--tool);border-style:dashed}
+.msg.tool.error .b{color:var(--bad)}
+.msg.summary{border-left-color:var(--sum);color:var(--sum)}
+.msg.runtime{border-left-color:var(--bad);color:var(--bad);opacity:.8}
+.msg.runtime .h span:last-child::after{content:" · not sent"}
+.msg .h .r{color:inherit}
+.ctx .none{font-family:var(--code);font-size:11.5px;color:var(--ink-faint)}
+
+#loop{display:block;width:100%}
+#loop text{font-family:var(--code)}
+#loop .node rect{fill:var(--bg);stroke:var(--line);stroke-width:1.2;rx:4}
+#loop .node text{font-size:11px;fill:var(--ink-dim);text-anchor:middle}
+#loop .node.on rect{stroke:var(--hot);fill:rgba(232,163,61,.12)}
+#loop .node.on text{fill:var(--hot)}
+#loop .edge{fill:none;stroke:var(--line);stroke-width:1.4}
+#loop .edge.on{stroke:var(--hot)}
+#loop .lbl{font-size:9px;fill:var(--ink-faint)}
+#loop .lbl.on{fill:var(--hot)}
+.stats{padding:8px 12px 10px;font-family:var(--code);font-size:11px;color:var(--ink-dim);border-top:1px solid var(--line);line-height:1.7}
+.stats b{color:var(--ink);font-weight:400}
+.stats .big{font-size:18px;color:var(--model);font-family:var(--mono);font-weight:700;line-height:1.2}
+.status{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase}
+.status.done{color:var(--sum)} .status.stopped{color:var(--bad)} .status.await{color:var(--tool)} .status.idle{color:var(--ink-faint)}
+
+.tools{padding:6px 12px 8px;font-family:var(--code);font-size:11px}
+.tools .t{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid rgba(46,58,71,.55)}
+.tools .t:last-child{border-bottom:none}
+.tools .t .n{color:var(--tool)} .tools .t.off .n{color:var(--ink-faint);text-decoration:line-through}
+.tools .t .d{color:var(--ink-faint);font-size:10.5px}
+.tools .t .f{color:var(--bad);font-size:10px}
+.mem{padding:8px 12px 10px;font-family:var(--code);font-size:11px;color:var(--ink-dim);border-top:1px solid var(--line)}
+.mem .k{color:var(--sum)} .mem .none{color:var(--ink-faint)}
+.mem .cap2{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+@keyframes pop{from{transform:translateY(4px);opacity:0}to{transform:none;opacity:1}}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:240px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--model)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .u{color:var(--user)} .log .m{color:var(--model)} .log .t{color:var(--tool)} .log .s{color:var(--sum)} .log .err{color:var(--bad)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--model)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:860px){
+  .stage{grid-template-columns:1fr 1fr}
+  .stage > .box:first-child{grid-column:1 / -1}
+}
+@media (max-width:520px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 01 · AI systems</p>
+  <h1>An agent is a <em>while loop</em> around a function that forgets everything</h1>
+  <p class="standfirst">The model has no memory, no hands, and no idea a loop exists. Each call
+  it is handed the entire conversation so far and returns either an answer or a request to
+  run a tool. Everything that makes it feel like an agent — tools running, results coming
+  back, stopping, remembering — is plumbing on the outside. Type to it, then step the loop.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>Context window · what the model sees, every call</span><span class="st" id="ctxcount"></span></div>
+      <div class="meter" id="meter"><div class="bar"><i></i></div><div class="lbl"><span id="meter-l"></span><span id="meter-r"></span></div></div>
+      <div class="ctx" id="ctx"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>The loop</span><span class="status" id="status"></span></div>
+      <svg id="loop" viewBox="0 0 260 200" aria-label="agent loop diagram"></svg>
+      <div class="stats" id="stats"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>Outside the context</span></div>
+      <div class="tools" id="tools"></div>
+      <div class="mem" id="mem"></div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="say what's the weather in Lisbon">
+    </div>
+  </div>
+  <p class="hintbar"><code>say &lt;message&gt;</code> · <code>step</code> · <code>run</code> ·
+  <code>context</code> · <code>fail search_flights 2</code> · <code>tool disable get_weather</code> ·
+  <code>compact</code> · <code>new session</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. The "model" is a
+    deterministic policy over the context — it decides by regex what a real model decides
+    by weights — so that the <em>loop</em> is the thing under the microscope, not the
+    model's judgement. Token counts are characters ÷ 4. Everything else is exactly how a real
+    runtime is wired: the model gets the whole context every call, tools are functions the
+    runtime chooses to run on the model's request, and memory is a tool like any other.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   messages: the context window. Roles: system | user | assistant (text) |
+   call (assistant tool request) | tool (result) | summary | runtime (shown,
+   never sent). tools: the registry. memory: a key/value store that lives
+   OUTSIDE the context and survives `new session`.
+   ========================================================================= */
+const tok = text => Math.ceil((text || "").length / 4) + 4;
+function hashStr(str) { let h = 0x811c9dc5; for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h; }
+
+const TOOL_DEFS = {
+  get_weather:    { sig: "get_weather(city)",    desc: "current conditions for a city" },
+  calculator:     { sig: "calculator(expr)",     desc: "evaluate an arithmetic expression" },
+  read_file:      { sig: "read_file(path)",      desc: "return the full contents of a file" },
+  search_flights: { sig: "search_flights(city)", desc: "list flights to a city" },
+  write_memory:   { sig: "write_memory(key, value)", desc: "persist a fact for future sessions" },
+  read_memory:    { sig: "read_memory()",        desc: "recall persisted facts" }
+};
+const FILES = {
+  "notes.md": "# Sprint notes\n" + "- Migrate the billing service to the new queue.\n- Retire the legacy cron jobs once metrics confirm parity.\n- Alice owns the rollout; Bob owns the rollback plan.\n".repeat(6),
+  "report.txt": "Quarterly infrastructure report. " + "Spend rose 12% driven by storage growth in the analytics cluster; compute was flat after the autoscaling changes. Incident count fell to four, all under thirty minutes. Recommended actions: tier cold data, review reserved capacity, and finish the observability rollout. ".repeat(9)
+};
+
+const BASE_SYSTEM = "You are a helpful assistant. You have no memory between calls; everything you know about this conversation is below. Reply with either a final answer or exactly one tool call.";
+function systemText(tools) {
+  const on = Object.keys(tools).filter(t => tools[t].enabled);
+  return BASE_SYSTEM + (on.length ? "\n\nTools:\n" + on.map(t => `- ${TOOL_DEFS[t].sig}: ${TOOL_DEFS[t].desc}`).join("\n") : "\n\n(no tools available)");
+}
+
+function initialState() {
+  const tools = Object.fromEntries(Object.keys(TOOL_DEFS).map(t => [t, { enabled: true, fail: 0 }]));
+  return {
+    messages: [{ role: "system", text: systemText(tools) }],
+    tools, memory: {},
+    turnLimit: 8, tokenLimit: 1600,
+    status: "idle",           /* idle | ready (user waiting) | await (tool call pending) | done | stopped */
+    calls: 0, sentTotal: 0, session: 1, lastNode: null, lastCallTokens: 0
+  };
+}
+const clone = s => structuredClone(s);
+const sent = s => s.messages.filter(m => m.role !== "runtime");
+const ctxTokens = s => sent(s).reduce((a, m) => a + tok(m.text), 0);
+const lastUserIdx = s => { for (let i = s.messages.length - 1; i >= 0; i--) if (s.messages[i].role === "user") return i; return -1; };
+const turnsSinceUser = s => s.messages.slice(lastUserIdx(s) + 1).filter(m => m.role === "assistant" || m.role === "call").length;
+
+/* ============================================================================
+   2. THE "MODEL" — a pure function of (context, tools) → text | tool call.
+   It never sees `state`; only the messages it's handed. Deterministic on
+   purpose: the loop is the lesson, not the model.
+   ========================================================================= */
+function model(messages, tools) {
+  const ui = (() => { for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") return i; return -1; })();
+  const user = ui >= 0 ? messages[ui].text.toLowerCase() : "";
+  const after = messages.slice(ui + 1);
+  const results = after.filter(m => m.role === "tool");
+  const okOf = name => results.filter(m => m.name === name && !m.error).pop();
+  const errs = name => results.filter(m => m.name === name && m.error);
+  const can = name => tools[name]?.enabled;
+  const summary = messages.find(m => m.role === "summary");
+
+  /* want(): the one tool this step needs, or null if it's already satisfied */
+  const want = (name, args, why, fallback) => {
+    if (okOf(name)) return null;
+    if (!can(name)) return { type: "text", text: fallback, why: `no ${name} in the tool list` };
+    const e = errs(name);
+    if (e.length >= 2) return { type: "text", text: `I tried ${name} twice and it failed both times (${e[e.length - 1].text}). I can't finish this without it.`, why: "gave up after two failures" };
+    return { type: "call", name, args, why: e.length ? `retrying ${name} after an error` : why };
+  };
+  let m, r;
+
+  if ((m = /weather (?:in|for) ([a-z\s]+?)[?.!]?$/.exec(user))) {
+    const city = cap(m[1].trim());
+    if ((r = want("get_weather", { city }, "need live data → get_weather", `I can't check live weather without a tool. ${city} is usually mild this time of year — but that's a guess from training data, not a reading.`))) return r;
+    const w = JSON.parse(okOf("get_weather").text);
+    return { type: "text", text: `It's ${w.temp_c}°C and ${w.sky} in ${w.city} right now.`, why: "have the result → answer" };
+  }
+  if ((m = /(?:what is|what's|calculate|compute)\s+([\d\s+\-*/().]+)[?.!]?$/.exec(user))) {
+    const expr = m[1].trim();
+    if ((r = want("calculator", { expr }, "arithmetic → calculator", `Working it out in my head: ${expr} is roughly ${roughly(expr)}. I'd trust a calculator more.`))) return r;
+    return { type: "text", text: `${expr} = ${okOf("calculator").text}`, why: "have the result → answer" };
+  }
+  if ((m = /(?:summari[sz]e|read|open) ([\w.-]+\.\w+)/.exec(user))) {
+    const path = m[1];
+    if ((r = want("read_file", { path }, "need the file's contents → read_file", "I can't read files without a tool."))) return r;
+    const body = okOf("read_file").text;
+    const words = body.split(/\s+/).length;
+    return { type: "text", text: path.startsWith("notes") ? `notes.md (${words} words): sprint notes about migrating billing to the new queue, retiring legacy cron jobs after parity, with Alice on rollout and Bob on rollback.`
+      : `report.txt (${words} words): infra spend up 12% on analytics storage, compute flat after autoscaling, four short incidents; recommends tiering cold data, reviewing reserved capacity, finishing observability.`, why: "file is in context → summarise it" };
+  }
+  if ((m = /plan (?:a |me a )?trip to ([a-z\s]+?)[?.!]?$/.exec(user))) {
+    const city = cap(m[1].trim());
+    if ((r = want("get_weather", { city }, "step 1 of the plan → get_weather", "I can't check the weather, so I'll skip that part."))) return r;
+    if ((r = want("search_flights", { city }, "step 2 of the plan → search_flights", "I can't look up flights without a tool."))) return r;
+    const w = JSON.parse(okOf("get_weather").text), f = JSON.parse(okOf("search_flights").text);
+    return { type: "text", text: `${city}: ${w.temp_c}°C and ${w.sky}. Cheapest flight is ${f[0].airline} ${f[0].flight} at $${f[0].price}; ${f.length} options total. Pack for ${w.sky === "rainy" ? "rain" : "sun"}.`, why: "both results in context → answer" };
+  }
+  if ((m = /remember (?:that )?my (\w+) is ([\w\s]+?)[.!]?$/.exec(user))) {
+    const key = m[1], value = cap(m[2].trim());
+    if ((r = want("write_memory", { key, value }, "asked to persist → write_memory", `I'll remember that for this conversation, but I have no way to keep it after the session ends.`))) return r;
+    return { type: "text", text: `Noted — your ${key} is ${value}. That's saved outside this conversation.`, why: "memory written → confirm" };
+  }
+  if ((m = /what(?:'s| is) my (\w+)/.exec(user))) {
+    const key = m[1];
+    const inCtx = messages.slice(0, ui).find(x => x.role === "user" && new RegExp(`my ${key} is (\\w+)`).exec(x.text.toLowerCase()));
+    if (inCtx) return { type: "text", text: `Your ${key} is ${cap(new RegExp(`my ${key} is (\\w+)`).exec(inCtx.text.toLowerCase())[1])} — you told me earlier in this conversation.`, why: "it's in the context → no tool needed" };
+    if (summary && new RegExp(key).test(summary.text.toLowerCase())) return { type: "text", text: `From the summary of our earlier conversation: ${summary.text.match(new RegExp(`${key}[^.;]*`, "i"))[0]}.`, why: "it's in the compaction summary" };
+    if ((r = want("read_memory", {}, "not in context → check memory", `I don't know your ${key}. It isn't anywhere in this conversation and I have no memory tool.`))) return r;
+    const mem = JSON.parse(okOf("read_memory").text);
+    return mem[key] ? { type: "text", text: `Your ${key} is ${mem[key]} — I found it in memory.`, why: "memory had it → answer" }
+                    : { type: "text", text: `I don't know your ${key}. It isn't in this conversation or in memory.`, why: "memory empty → say so" };
+  }
+  if (/^(hi|hello|hey)\b/.test(user)) return { type: "text", text: "Hello! I can check weather, do arithmetic, read files, plan trips, and remember things.", why: "greeting → answer directly" };
+  return { type: "text", text: "I can help with weather, arithmetic, files, trip planning, and remembering facts. What would you like?", why: "no tool fits → answer directly" };
+}
+const cap = s => s.replace(/\b\w/g, c => c.toUpperCase());
+const roughly = expr => { try { return Math.round(Function(`"use strict";return (${expr.replace(/[^\d+\-*/(). ]/g, "")})`)() * 0.93); } catch { return "…"; } };
+
+/* ============================================================================
+   3. TOOLS — plain functions. The runtime runs them; the model only asked.
+   ========================================================================= */
+const TOOLS = {
+  get_weather: ({ city }) => { const h = hashStr(city || ""); return JSON.stringify({ city, temp_c: 8 + (h % 22), sky: ["sunny", "cloudy", "rainy", "clear"][h % 4] }); },
+  calculator: ({ expr }) => { const clean = (expr || "").replace(/[^\d+\-*/(). ]/g, ""); if (!clean) throw new Error("empty expression"); return String(Function(`"use strict";return (${clean})`)()); },
+  read_file: ({ path }) => { if (!(path in FILES)) throw new Error(`ENOENT: no such file '${path}'`); return FILES[path]; },
+  search_flights: ({ city }) => { const h = hashStr(city || ""); return JSON.stringify([0, 1, 2].map(i => ({ airline: ["Aer", "Nordic", "Skyline"][(h + i) % 3], flight: `${["AE", "NX", "SK"][(h + i) % 3]}${100 + ((h >>> (i * 3)) % 800)}`, price: 180 + ((h >>> i) % 500) + i * 60 }))); },
+  write_memory: ({ key, value }, s) => { s.memory[key] = value; return `saved ${key}`; },
+  read_memory: (_, s) => JSON.stringify(s.memory)
+};
+
+/* ============================================================================
+   4. THE LOOP — one iteration: check limits, call the model with the whole
+   context, append its output, and if it asked for a tool, run it and append
+   the result. This function IS the agent.
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const push = (n, m) => n.messages.push(m);
+
+function iterate(n) {
+  const out = [];
+  if (n.status === "done" || n.status === "stopped") return { out: [line(n.status === "done" ? "the loop already exited with an answer — say something new" : "the loop is stopped — say something, compact, or start a new session", "dim")], noop: true };
+  if (n.status === "idle") return { out: [line("nothing to do: no user message is waiting", "dim")], noop: true };
+
+  /* stop conditions belong to the runtime, not the model */
+  const used = ctxTokens(n);
+  if (used > n.tokenLimit) {
+    push(n, { role: "runtime", text: `stopped: context is ${used} tokens, limit ${n.tokenLimit}. Compact or start a new session.` });
+    n.status = "stopped"; n.lastNode = "stop";
+    return { out: [line(`runtime: context window full (${used}/${n.tokenLimit} tokens). The model was not called.`, "err")] };
+  }
+  const turns = turnsSinceUser(n);
+  if (turns >= n.turnLimit) {
+    push(n, { role: "runtime", text: `stopped: ${turns} model calls since the last user message, limit ${n.turnLimit}.` });
+    n.status = "stopped"; n.lastNode = "stop";
+    return { out: [line(`runtime: turn limit reached (${turns}/${n.turnLimit}). The model was not called.`, "err")] };
+  }
+
+  /* the call: hand over EVERYTHING */
+  const ctx = sent(n);
+  n.calls++; n.lastCallTokens = used; n.sentTotal += used;
+  const r = model(ctx, n.tools);
+  out.push(line(`call #${n.calls} → model reads ${used} tokens (${ctx.length} messages)`, "dim"));
+
+  if (r.type === "text") {
+    push(n, { role: "assistant", text: r.text, why: r.why });
+    n.status = "done"; n.lastNode = "answer";
+    out.push(line(`model: ${r.text}`, "m"), line(`   (${r.why}) → plain text, so the loop exits`, "dim"));
+    return { out };
+  }
+  const argStr = JSON.stringify(r.args);
+  push(n, { role: "call", name: r.name, args: r.args, text: `${r.name}(${argStr})`, why: r.why });
+  out.push(line(`model: tool_call ${r.name}(${argStr})`, "t"), line(`   (${r.why})`, "dim"));
+
+  /* the runtime, not the model, runs the tool */
+  const t = n.tools[r.name];
+  let result, error = false;
+  if (!t || !t.enabled) { result = `error: unknown tool ${r.name}`; error = true; }
+  else if (t.fail > 0) { t.fail--; result = `error: ${r.name} timed out after 5s`; error = true; }
+  else { try { result = TOOLS[r.name](r.args, n); } catch (e) { result = `error: ${e.message}`; error = true; } }
+  push(n, { role: "tool", name: r.name, text: result, error });
+  n.status = "ready"; n.lastNode = "tool";
+  const preview = result.length > 90 ? result.slice(0, 88) + "…" : result;
+  out.push(line(`tool: ${preview}`, error ? "err" : "t"), line(`   ${tok(result)} tokens appended to the context${error ? " — an error is just more text" : ""}`, "dim"));
+  return { out };
+}
+
+/* ============================================================================
+   5. COMMANDS
+   ========================================================================= */
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+
+const REGISTRY = {
+  "say": (s, args, raw) => {
+    const text = raw.trim().replace(/^say\s*/i, "");
+    if (!text) return fail("say what?");
+    const n = clone(s);
+    push(n, { role: "user", text });
+    n.status = "ready"; n.lastNode = "context";
+    return { state: n, out: [line(`user: ${text}`, "u"), line(`appended (${tok(text)} tokens). Nothing has happened: the model isn't called until the loop runs.`, "dim")] };
+  },
+  "step": s => { const n = clone(s); const r = iterate(n); return r.noop ? { out: r.out } : { state: n, out: r.out }; },
+  "run": s => {
+    const n = clone(s), out = [];
+    if (n.status !== "ready" && n.status !== "await") return { out: [line("nothing to run — say something first", "dim")] };
+    for (let i = 0; i < 12 && (n.status === "ready" || n.status === "await"); i++) {
+      const r = iterate(n); out.push(...r.out);
+      if (r.noop) break;
+    }
+    out.push(line(`loop exited: ${n.status}. ${turnsSinceUser(n)} model call(s) for this message; ${n.sentTotal} tokens sent to the model in total this session.`, n.status === "done" ? "s" : "err"));
+    return { state: n, out };
+  },
+  "context": s => ({ out: [line(`${sent(s).length} messages · ${ctxTokens(s)} tokens · limit ${s.tokenLimit}`, "dim"),
+    ...s.messages.map((m, i) => line(`${String(i).padStart(2)} ${m.role.padEnd(9)} ${String(tok(m.text)).padStart(4)}t  ${m.text.replace(/\s+/g, " ").slice(0, 80)}${m.text.length > 80 ? "…" : ""}`,
+      { user: "u", assistant: "m", call: "t", tool: m.error ? "err" : "t", summary: "s", runtime: "err" }[m.role] || "dim"))] }),
+  "tool": (s, args) => {
+    const [what, name] = args;
+    if (!/^(enable|disable)$/.test(what || "") || !s.tools[name]) return fail(`usage: tool enable|disable <${Object.keys(TOOL_DEFS).join("|")}>`);
+    const n = clone(s); n.tools[name].enabled = what === "enable";
+    n.messages[0].text = systemText(n.tools);
+    return { state: n, out: [line(`${name} ${what}d`, "t"), line(`the system prompt was rewritten: tool descriptions are just text the model reads (${tok(n.messages[0].text)} tokens now)`, "dim")] };
+  },
+  "fail": (s, args) => {
+    const [name, times] = args;
+    if (!s.tools[name]) return fail(`usage: fail <tool> [times]`);
+    const n = clone(s); n.tools[name].fail = Math.max(1, +times || 1);
+    return { state: n, out: [line(`${name} will fail on its next ${n.tools[name].fail} call(s)`, "err")] };
+  },
+  "limit": (s, args) => {
+    const [what, v] = args;
+    if (!/^(turns|tokens)$/.test(what || "") || !(+v > 0)) return fail("usage: limit turns N | limit tokens N");
+    const n = clone(s); if (what === "turns") n.turnLimit = +v; else n.tokenLimit = +v;
+    return { state: n, out: [line(`${what} limit is now ${v}`, "dim")] };
+  },
+  "compact": s => {
+    const n = clone(s);
+    const old = n.messages.filter(m => m.role !== "system" && m.role !== "runtime");
+    if (old.length < 3) return { out: [line("nothing worth compacting yet", "dim")] };
+    const facts = [];
+    old.forEach(m => {
+      if (m.role === "user") { const f = /my (\w+) is ([\w\s]+?)[.!]?$/i.exec(m.text); if (f) facts.push(`user's ${f[1]} is ${cap(f[2])}`); }
+      if (m.role === "assistant") facts.push(m.text.length > 70 ? m.text.slice(0, 68) + "…" : m.text);
+    });
+    const summary = `Summary of earlier conversation (${old.length} messages, ${old.reduce((a, m) => a + tok(m.text), 0)} tokens): ` + (facts.length ? facts.join("; ") : "small talk, nothing actionable") + ".";
+    n.messages = [n.messages[0], { role: "summary", text: summary }];
+    n.status = "idle"; n.lastNode = "context";
+    const before = ctxTokens(s), after = ctxTokens(n);
+    return { state: n, out: [line(`compacted ${old.length} messages into one summary: ${before} → ${after} tokens`, "s"),
+      line("the detail is gone for good. Whatever the summariser dropped, the model can never see again.", "dim")] };
+  },
+  "new": (s, args) => {
+    if (args[0] !== "session") return fail("usage: new session");
+    const n = clone(s);
+    n.messages = [{ role: "system", text: systemText(n.tools) }];
+    n.status = "idle"; n.lastNode = null; n.session++; n.calls = 0; n.sentTotal = 0;
+    return { state: n, out: [line(`session ${n.session}: context cleared`, "s"),
+      line(`memory store still holds ${Object.keys(n.memory).length} item(s) — it lives outside the context`, "dim")] };
+  },
+  "help": () => ({ out: [
+    line("say <text>               append a user message (nothing runs yet)", "u"),
+    line("step                     one loop iteration: model call, then tool if asked", "m"),
+    line("run                      iterate until the model answers or a limit stops it", "m"),
+    line("context                  print the context window with token counts", "ok"),
+    line("tool enable|disable <n>  edit the registry (and therefore the system prompt)", "t"),
+    line("fail <tool> [times]      make a tool error out", "t"),
+    line("limit turns|tokens N     the runtime's stop conditions", "ok"),
+    line("compact                  replace the conversation with a summary", "s"),
+    line("new session              clear the context; memory survives", "s"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase();
+  if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1), raw);
+  return fail(`${w}: not a command — try 'help' (to talk to the agent, use: say <text>)`);
+}
+
+/* ============================================================================
+   6. RENDERER
+   ========================================================================= */
+const ROLE_LABEL = { system: "system", user: "user", assistant: "assistant", call: "assistant · tool call", tool: "tool result", summary: "summary", runtime: "runtime" };
+
+function render(s) {
+  /* context window */
+  const used = ctxTokens(s), pct = Math.min(100, used / s.tokenLimit * 100);
+  d3.select("#meter").attr("class", "meter" + (used > s.tokenLimit ? " full" : pct > 70 ? " warn" : ""));
+  d3.select("#meter .bar i").style("width", pct + "%");
+  d3.select("#meter-l").text(`${used} / ${s.tokenLimit} tokens`);
+  d3.select("#meter-r").text(used > s.tokenLimit ? "over the limit" : `${Math.round(pct)}% · system prompt ${tok(s.messages[0].text)}t`);
+  d3.select("#ctxcount").text(`${sent(s).length} msgs · session ${s.session}`);
+  const maxT = Math.max(...s.messages.map(m => tok(m.text)), 1);
+  const mj = d3.select("#ctx").selectAll("div.msg").data(s.messages.map((m, i) => ({ ...m, i })), d => d.i + ":" + d.role + ":" + d.text.length);
+  mj.exit().remove();
+  const me = mj.enter().append("div").attr("class", d => "msg " + d.role + (d.error ? " error" : ""))
+    .on("click", function () { this.classList.toggle("open"); });
+  me.append("div").attr("class", "h").html(d => `<span class="r">${ROLE_LABEL[d.role]}${d.role === "call" || d.role === "tool" ? " · " + d.name : ""}</span><span>${tok(d.text)} tok</span>`);
+  me.append("div").attr("class", "b").text(d => d.why && d.role !== "assistant" ? `${d.text}` : d.text).attr("title", d => (d.why ? `why: ${d.why}\n\n` : "") + "click to expand");
+  me.append("div").attr("class", "tb").append("i").style("width", d => (tok(d.text) / maxT * 100) + "%");
+  me.merge(mj).order();
+  const ctxEl = document.getElementById("ctx"); ctxEl.scrollTop = ctxEl.scrollHeight;
+
+  /* the loop */
+  const st = d3.select("#status").attr("class", "status " + (s.status === "done" ? "done" : s.status === "stopped" ? "stopped" : s.status === "idle" ? "idle" : "await"))
+    .text({ idle: "idle", ready: "ready · model's turn", await: "awaiting tool", done: "exited · answered", stopped: "stopped by runtime" }[s.status]);
+  renderLoop(s);
+  d3.select("#stats").html(`
+    <div class="big">${s.sentTotal.toLocaleString()} <span style="font-size:11px;color:var(--ink-faint);font-weight:400">tokens sent this session</span></div>
+    <div>calls: <b>${s.calls}</b> · last call read <b>${s.lastCallTokens}</b> tok</div>
+    <div>context now: <b>${used}</b> tok — every call re-sends all of it</div>
+    <div>limits: <b>${s.turnLimit}</b> calls per message · <b>${s.tokenLimit}</b> tok</div>`);
+
+  /* outside the context */
+  const tools = Object.keys(TOOL_DEFS).map(t => ({ name: t, ...s.tools[t], ...TOOL_DEFS[t] }));
+  const tj = d3.select("#tools").selectAll("div.t").data(tools, d => d.name);
+  const te = tj.enter().append("div").attr("class", "t");
+  te.append("div"); te.append("div").attr("class", "f");
+  const tm = te.merge(tj).attr("class", d => "t" + (d.enabled ? "" : " off"));
+  tm.select("div:first-child").html(d => `<span class="n">${d.sig}</span><br><span class="d">${d.desc}</span>`);
+  tm.select(".f").text(d => d.fail ? `fails ×${d.fail}` : d.enabled ? "" : "off");
+  const mem = Object.entries(s.memory);
+  d3.select("#mem").html(`<div class="cap2">memory store · survives new session</div>` + (mem.length ? mem.map(([k, v]) => `<div><span class="k">${k}</span>: ${v}</div>`).join("") : `<div class="none">empty — only write_memory writes here</div>`));
+}
+
+function renderLoop(s) {
+  const svg = d3.select("#loop");
+  if (svg.select("g").empty()) {
+    const g = svg.append("g");
+    const nodes = [["context", 62, 40, "context"], ["model", 198, 40, "model"], ["tool", 198, 150, "tool"], ["answer", 62, 150, "answer"]];
+    const path = (a, b, c, d) => `M${a},${b} L${c},${d}`;
+    g.append("path").attr("class", "edge e-cm").attr("d", path(104, 40, 156, 40));
+    g.append("path").attr("class", "edge e-mt").attr("d", path(198, 58, 198, 132));
+    g.append("path").attr("class", "edge e-tc").attr("d", "M156,150 C120,150 90,120 62,58");
+    g.append("path").attr("class", "edge e-ma").attr("d", "M156,48 C130,70 100,110 90,132");
+    g.append("text").attr("class", "lbl l-cm").attr("x", 130).attr("y", 32).attr("text-anchor", "middle").text("send everything");
+    g.append("text").attr("class", "lbl l-mt").attr("x", 205).attr("y", 98).text("tool call");
+    g.append("text").attr("class", "lbl l-tc").attr("x", 84).attr("y", 106).attr("text-anchor", "end").text("append result");
+    g.append("text").attr("class", "lbl l-ma").attr("x", 128).attr("y", 118).text("text → exit");
+    g.append("text").attr("class", "lbl l-stop").attr("x", 130).attr("y", 190).attr("text-anchor", "middle").text("");
+    nodes.forEach(([k, x, y, t]) => {
+      const n = g.append("g").attr("class", "node n-" + k);
+      n.append("rect").attr("x", x - 42).attr("y", y - 18).attr("width", 84).attr("height", 36);
+      n.append("text").attr("x", x).attr("y", y + 4).text(t);
+    });
+  }
+  const on = s.lastNode;
+  ["context", "model", "tool", "answer"].forEach(k => svg.select(".n-" + k).classed("on", on === k || (on === "tool" && k === "model" && false)));
+  svg.select(".e-cm").classed("on", on === "tool" || on === "answer");
+  svg.select(".l-cm").classed("on", on === "tool" || on === "answer");
+  svg.select(".e-mt").classed("on", on === "tool"); svg.select(".l-mt").classed("on", on === "tool");
+  svg.select(".e-tc").classed("on", on === "tool"); svg.select(".l-tc").classed("on", on === "tool");
+  svg.select(".e-ma").classed("on", on === "answer"); svg.select(".l-ma").classed("on", on === "answer");
+  svg.select(".l-stop").classed("on", on === "stop").text(on === "stop" ? "⛔ runtime stopped the loop before calling the model" : s.status === "ready" ? "next: the model is called with the whole context" : "");
+}
+
+/* ============================================================================
+   7. LESSON
+   ========================================================================= */
+const last = s => s.messages[s.messages.length - 1];
+const hasTool = (s, name) => s.messages.some(m => m.role === "tool" && m.name === name);
+const lastUserIs = (s, re) => { const i = lastUserIdx(s); return i >= 0 && re.test(s.messages[i].text); };
+
+const LESSON = [
+  { title: "Start with what the model sees",
+    body: `The context window holds one message: the system prompt, which includes the list of
+    tools <em>as text</em>. That's all a tool is to the model — a line in a prompt saying it
+    may ask for something by name. Nothing on the right can be touched by the model directly.`,
+    try: "context", expect: /^context/, readonly: true },
+
+  { title: "Say something",
+    body: `Your message is appended to the context. Watch the loop diagram: nothing lights up.
+    The model has not been called. In a real system this is the moment between you hitting
+    enter and the request leaving for the API.`,
+    try: "say what's the weather in Lisbon", expect: /^say .*weather/i,
+    needs: s => s.status === "idle" && s.messages.length === 1 },
+
+  { title: "One iteration",
+    body: `The runtime sends the <strong>entire</strong> context to the model. The model can't
+    check the weather; it can only emit text. So it emits a specially formatted piece of text
+    asking for <code>get_weather</code>. The runtime — ordinary code — sees that, runs the
+    function, and pastes the result into the context as another message.`,
+    try: "step", expect: /^step/,
+    needs: s => s.status === "ready" && lastUserIs(s, /weather in lisbon/i) && !hasTool(s, "get_weather") },
+
+  { title: "Second iteration: exit",
+    body: `Same call, one more message in the context. This time the model sees a tool result
+    it can use and emits plain text. Plain text means "I'm done", so the loop exits. Two
+    calls, one answer. That is the whole architecture.`,
+    try: "step", expect: /^step/,
+    needs: s => s.status === "ready" && hasTool(s, "get_weather") && last(s).role === "tool" },
+
+  { title: "Every call re-sends everything",
+    body: `Ask something else. <code>run</code> iterates until the loop exits. Watch the "tokens
+    sent" counter: it grows by the <em>whole</em> context each call, not by the new part. Cost
+    and latency are quadratic-ish in conversation length for exactly this reason.`,
+    try: "say what is 17 * 23", expect: /^say .*\d+\s*\*\s*\d+/,
+    needs: s => s.status === "done" },
+
+  { title: "Run it",
+    body: `Two iterations: calculator, then answer. The model did no arithmetic. It asked for a
+    calculator by name, and a function did the arithmetic.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /\d+\s*\*\s*\d+/) },
+
+  { title: "Tool results cost context",
+    body: `Ask it to summarise a file. The file's entire contents come back as a tool result
+    and land in the context, where they will be re-sent on every future call for the rest of
+    the session. The token bar is about to jump.`,
+    try: "say summarize notes.md", expect: /^say .*notes\.md/,
+    needs: s => s.status === "done" && !hasTool(s, "read_file") },
+
+  { title: "Run it",
+    body: `One tool call, one big result, one answer. Click the tool-result block to expand it
+    — that's what the model now has to read every single time.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /notes\.md/) },
+
+  { title: "A plan is just more iterations",
+    body: `Trip planning needs two tools. There is no planner component. The model asks for one
+    tool, reads the result on the next call, asks for the next, reads that, and answers. Each
+    call it re-derives what to do next from the context, including its own earlier requests.`,
+    try: "say plan a trip to Tokyo", expect: /^say .*trip to tokyo/i,
+    needs: s => s.status === "done" && !lastUserIs(s, /tokyo/i) },
+
+  { title: "Run it: three calls",
+    body: `Weather, flights, answer. Watch the tool node light twice.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /tokyo/i) },
+
+  { title: "Tools fail. The error is just text",
+    body: `Make the flight search time out once. The runtime doesn't handle it; it pastes the
+    error into the context like any other result and calls the model again. Whether to retry
+    is the model's decision, made by reading the error.`,
+    try: "fail search_flights", expect: /^fail search_flights/,
+    needs: s => s.status === "done" && !s.tools.search_flights.fail },
+
+  { title: "Plan another trip",
+    body: `Same request, different city.`,
+    try: "say plan a trip to Oslo", expect: /^say .*trip to oslo/i,
+    needs: s => s.status === "done" && s.tools.search_flights.fail === 1 },
+
+  { title: "Run it: four calls, one retry",
+    body: `Weather succeeds, flights fail, the model asks again, flights succeed, answer. The
+    retry cost a full extra pass over the context.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /oslo/i) && s.tools.search_flights.fail === 1 },
+
+  { title: "Loops need a way out that isn't the model",
+    body: `Now make flights fail three times and cap the loop at three calls per message. The
+    model will retry once, give up on the second failure — but it never gets that far, because
+    the runtime stops it first. Turn limits, token limits, and timeouts are the runtime's job;
+    the model can't be trusted to notice it's stuck.`,
+    try: "fail search_flights 3", expect: /^fail search_flights 3/,
+    needs: s => s.status === "done" && s.tools.search_flights.fail === 0 },
+
+  { title: "Set the limit",
+    body: `Three model calls per user message.`,
+    try: "limit turns 3", expect: /^limit turns 3/,
+    needs: s => s.tools.search_flights.fail === 3 && s.turnLimit !== 3 },
+
+  { title: "Plan a doomed trip",
+    body: `Rome, this time.`,
+    try: "say plan a trip to Rome", expect: /^say .*trip to rome/i,
+    needs: s => s.status === "done" && s.turnLimit === 3 && s.tools.search_flights.fail === 3 },
+
+  { title: "Run into the wall",
+    body: `Weather (1), flights fail (2), retry fails (3), and the runtime refuses the fourth
+    call. A red runtime message lands in the context — shown to you, never sent to the model.
+    Without this the loop would spin until the token limit or your credit card stopped it.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /rome/i) && s.turnLimit === 3 },
+
+  { title: "The context is the only memory",
+    body: `Tell it your name. The model has no state between calls; the only reason it will
+    know your name on the next call is that your message is still in the context. To keep it
+    longer than that, it has to ask a tool to write it somewhere outside.`,
+    try: "say remember my name is Sam", expect: /^say remember my name is/i,
+    needs: s => s.status === "stopped" || s.status === "done" },
+
+  { title: "Run it",
+    body: `The model calls <code>write_memory</code>. Look at the memory store on the right —
+    the first thing that has changed outside the context window.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /remember my name/i) },
+
+  { title: "New session: the context is gone",
+    body: `Everything the model "knew" is deleted. The memory store is not, because it was
+    never inside the context. This is the difference between a chat history and memory.`,
+    try: "new session", expect: /^new session/,
+    needs: s => s.memory.name && s.messages.length > 1 },
+
+  { title: "Ask what it should have forgotten",
+    body: `Nothing in the context mentions a name.`,
+    try: "say what's my name", expect: /^say .*my name/i,
+    needs: s => s.messages.length === 1 && s.memory.name },
+
+  { title: "Run it: memory is a tool",
+    body: `The model sees no name in the context, so it asks <code>read_memory</code>, and the
+    runtime returns the store's contents as text. "Memory" is a tool call plus a database.
+    There is nothing else it could be.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /my name/i) && s.messages.length === 2 },
+
+  { title: "Long sessions: compaction",
+    body: `Read the big report so the context fills up.`,
+    try: "say summarize report.txt", expect: /^say .*report\.txt/,
+    needs: s => s.status === "done" && !hasTool(s, "read_file") },
+
+  { title: "Run it",
+    body: `The bar goes amber. A few more of these and the runtime would refuse to call the
+    model at all.`,
+    try: "run", expect: /^run/,
+    needs: s => s.status === "ready" && lastUserIs(s, /report\.txt/) },
+
+  { title: "Compact",
+    body: `The runtime replaces the conversation with a summary — written, in real systems, by
+    another model call. The context shrinks. So does what the model can know: anything the
+    summary left out is gone forever. Long-running agents are a series of these lossy resets.`,
+    try: "compact", expect: /^compact/,
+    needs: s => s.messages.length > 3 && !s.messages.some(m => m.role === "summary") },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>tool disable get_weather</code> and ask
+    about the weather — watch the model answer from training data instead, and notice how
+    reasonable it sounds. Or lower <code>limit tokens</code> and see the runtime stop a run
+    mid-plan.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   8. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Agent loop sandbox loaded. Type 'help', or: say hello", "dim");
+</script>
+</body>
+</html>
