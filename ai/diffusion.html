@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noise forward, learn the way back — a diffusion sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Data is cyan and pink (two classes). Noise is faint. The model's guess —
+   the one thing that is learned — is amber. Samples are green once they're
+   done and white while still noisy.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --a:#5cc8d6; --b:#e07aa8; --guess:#e8a33d; --sample:#6fbf73; --ref:#b08be8; --bad:#e06c6c;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--guess)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--ref);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--ref);color:var(--ref)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--ref);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: two canvases. Left, the forward process — data being
+   destroyed by a fixed recipe, with a slider over time. Right, the reverse
+   process — samples being recovered from noise by the learned step. Between
+   them the schedule, which is the only thing the two share.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.stage{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+canvas{display:block;width:100%;height:auto;background:var(--bg)}
+.ctl{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-top:1px solid var(--line);font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.ctl input[type=range]{flex:1;min-width:120px;accent-color:var(--guess)}
+.ctl b{color:var(--ink);font-weight:400}
+.ctl button{padding:3px 9px;font-size:11px}
+.ctl button.on{border-color:var(--guess);color:var(--guess)}
+.pick.on{border-color:var(--ref);color:var(--ref);background:rgba(176,139,232,.12)}
+.sched{margin-top:12px}
+.sched svg{display:block;width:100%;height:110px}
+.sched text{font-family:var(--code);font-size:9.5px;fill:var(--ink-faint)}
+.sched .ab{fill:none;stroke:var(--a);stroke-width:1.6}
+.sched .nz{fill:none;stroke:var(--ink-faint);stroke-width:1.2;stroke-dasharray:3 3}
+.sched .tmark{stroke:var(--guess);stroke-width:1.2}
+.sched .smark{stroke:var(--sample);stroke-width:1.2;stroke-dasharray:2 2}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;padding:10px 12px;font-family:var(--code);font-size:11px;color:var(--ink-dim);border-top:1px solid var(--line)}
+.stats .k{color:var(--ink-faint);font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+.stats .v{font-family:var(--mono);font-size:15px;color:var(--ink);font-weight:700}
+.stats .v.g{color:var(--guess)} .stats .v.s{color:var(--sample)} .stats .v.b{color:var(--bad)}
+.legend{display:flex;gap:12px;flex-wrap:wrap;padding:6px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint)}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:200px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--ref)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--sample)} .log .mod{color:var(--guess)} .log .err{color:var(--bad)} .log .a{color:var(--a)} .log .b{color:var(--b)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--ref)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:700px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 03 · AI systems</p>
+  <h1>Destroy the data on a schedule. Learn to <em>undo one step</em></h1>
+  <p class="standfirst">A diffusion model has two halves. The forward half is a fixed recipe that
+  adds noise until nothing is left — no learning, no choices. The only thing that is learned is
+  a single function: given a noisy point and how noisy it is, which way is the data? Run that
+  function backwards fifty times and you have a generator.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>Forward · q(x<sub>t</sub> | x<sub>0</sub>) · fixed</span><span class="st" id="fwd-st"></span></div>
+      <canvas id="fwd" width="480" height="400"></canvas>
+      <div class="ctl"><span>t</span><input type="range" id="tslider" min="0" max="50" step="1"><b id="tval"></b>
+        <button id="fieldbtn" title="show the model's guess direction on a grid">field</button></div>
+      <div class="legend"><span><i style="background:var(--a)"></i>class A</span><span><i style="background:var(--b)"></i>class B</span><span><i style="background:var(--guess)"></i>model's guess: which way is the data</span></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>Reverse · p(x<sub>t−1</sub> | x<sub>t</sub>) · learned</span><span class="st" id="rev-st"></span></div>
+      <canvas id="rev" width="480" height="400"></canvas>
+      <div class="ctl"><button id="resetbtn">reset</button><button id="stepbtn">step</button><button id="samplebtn">sample</button>
+        <span>steps <b id="stepsv"></b> · guidance <b id="guidev"></b> · model smoothness <b id="bwv"></b></span></div>
+      <div class="legend"><span><i style="background:var(--ink-dim)"></i>sample, still noisy</span><span><i style="background:var(--sample)"></i>sample at t=0</span><span><i style="background:var(--guess)"></i>guess lines (field on)</span></div>
+    </div>
+  </div>
+  <div class="box sched">
+    <div class="cap"><span>The schedule · the only thing both halves share</span><span class="st">ᾱ<sub>t</sub> = how much signal survives at t</span></div>
+    <svg id="schedsvg" viewBox="0 0 1000 110" preserveAspectRatio="none"></svg>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="t 25">
+    </div>
+  </div>
+  <p class="hintbar"><code>t 25</code> · <code>field on</code> · <code>reset</code> · <code>step</code> · <code>sample</code> ·
+  <code>steps 5</code> · <code>guide A 1</code> · <code>smooth 2</code> · <code>data ring</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes, with clickable controls
+    issuing the same commands. The forward process is the real closed form with a cosine
+    schedule over 50 steps. The "model" is the exact Bayes-optimal denoiser for the training
+    set — a kernel average of the training points weighted by how likely each is to have
+    produced the noisy input — which is what a perfectly trained network would converge to.
+    <code>smooth</code> widens that kernel to imitate a smaller model that can't memorise.
+    Sampling is DDIM (deterministic). Guidance is classifier-free: the conditional denoiser
+    only sees one class's points, and the strength interpolates or extrapolates between it
+    and the unconditional one.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE + THE TOY MODEL
+   ========================================================================= */
+const T = 50, NP = 220, NS = 300;
+function hashStr(str) { let h = 0x811c9dc5; for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h; }
+function rng(seed) { let s = hashStr(String(seed)) || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
+function gauss(r) { const u = Math.max(r(), 1e-9), v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+/* cosine schedule: ᾱ_t, t = 0..T */
+const abar = t => { const s = 0.008, f = x => Math.cos((x / T + s) / (1 + s) * Math.PI / 2) ** 2; return Math.max(1e-4, Math.min(1, f(t) / f(0))); };
+
+const DATASETS = {
+  moons: r => { const pts = []; for (let i = 0; i < NP; i++) { const a = Math.PI * r(), c = i % 2; const x = c ? 1 - Math.cos(a) : Math.cos(a), y = c ? 0.5 - Math.sin(a) : Math.sin(a) - 0.0;
+    pts.push({ x: (x - 0.5) * 0.9 + gauss(r) * 0.03, y: (y - 0.25) * 0.9 + gauss(r) * 0.03, c }); } return pts; },
+  ring: r => { const pts = []; for (let i = 0; i < NP; i++) { const a = 2 * Math.PI * r(), c = a < Math.PI ? 0 : 1; pts.push({ x: Math.cos(a) * 0.8 + gauss(r) * 0.03, y: Math.sin(a) * 0.8 + gauss(r) * 0.03, c }); } return pts; },
+  smile: r => { const pts = []; for (let i = 0; i < NP; i++) { const u = r(); let x, y, c;
+    if (u < 0.55) { const a = Math.PI * (0.15 + 0.7 * r()); x = Math.cos(a) * 0.75; y = -Math.sin(a) * 0.75 + 0.15; c = 1; }
+    else if (u < 0.78) { x = -0.35 + gauss(r) * 0.07; y = 0.45 + gauss(r) * 0.07; c = 0; }
+    else { x = 0.35 + gauss(r) * 0.07; y = 0.45 + gauss(r) * 0.07; c = 0; }
+    pts.push({ x: x + gauss(r) * 0.02, y: y + gauss(r) * 0.02, c }); } return pts; }
+};
+function makeData(name) { return DATASETS[name](rng("data:" + name)); }
+
+function initialState() {
+  return { data: "moons", t: 0, seed: 1, field: false, smooth: 1, steps: 50, guide: { cls: null, s: 0 },
+           particles: null, /* {ts:[...], i, x:[[x,y]...], x0:[...]} */ };
+}
+const clone = s => structuredClone(s);
+
+/* ε̂ and x̂0 at (x, t): kernel average of training points. cls restricts to a class. */
+function denoise(x, t, pts, smooth, cls) {
+  /* smooth > 1 adds a floor to the kernel width, so even at low noise the
+     model can't tell neighbouring training points apart — a stand-in for
+     limited capacity. smooth = 1 is the exact posterior. */
+  const ab = abar(t), sa = Math.sqrt(ab), va = (1 - ab) + (smooth - 1) * 0.015;
+  let sx = 0, sy = 0, sw = 0, mx = -Infinity;
+  const lw = [];
+  for (const p of pts) { if (cls !== null && p.c !== cls) { lw.push(null); continue; }
+    const dx = x[0] - sa * p.x, dy = x[1] - sa * p.y; const l = -(dx * dx + dy * dy) / (2 * va); lw.push(l); if (l > mx) mx = l; }
+  pts.forEach((p, i) => { if (lw[i] === null) return; const w = Math.exp(lw[i] - mx); sx += w * p.x; sy += w * p.y; sw += w; });
+  const x0 = [sx / sw, sy / sw];
+  const sq = Math.sqrt(1 - ab);
+  const eps = [(x[0] - sa * x0[0]) / sq, (x[1] - sa * x0[1]) / sq];
+  return { x0, eps };
+}
+function guided(x, t, s) {
+  const pts = cachedData(s.data);
+  const u = denoise(x, t, pts, s.smooth, null);
+  if (s.guide.cls === null || s.guide.s === 0) return u;
+  const c = denoise(x, t, pts, s.smooth, s.guide.cls);
+  const eps = [u.eps[0] + s.guide.s * (c.eps[0] - u.eps[0]), u.eps[1] + s.guide.s * (c.eps[1] - u.eps[1])];
+  const ab = abar(t), sa = Math.sqrt(ab), sq = Math.sqrt(1 - ab);
+  return { eps, x0: [(x[0] - sq * eps[0]) / sa, (x[1] - sq * eps[1]) / sa] };
+}
+const _dc = {}; const cachedData = name => _dc[name] || (_dc[name] = makeData(name));
+
+/* forward: x_t for every training point with a fixed noise draw */
+function forwardCloud(s) {
+  const pts = cachedData(s.data), r = rng("noise:" + s.seed), ab = abar(s.t), sa = Math.sqrt(ab), sq = Math.sqrt(1 - ab);
+  return pts.map(p => { const e = [gauss(r), gauss(r)]; return { x: sa * p.x + sq * e[0], y: sa * p.y + sq * e[1], c: p.c, e }; });
+}
+/* reverse: one DDIM step from ts[i] to ts[i+1] */
+function reverseStep(s, P) {
+  const tFrom = P.ts[P.i], tTo = P.ts[P.i + 1];
+  const abTo = abar(tTo), saTo = Math.sqrt(abTo), sqTo = tTo === 0 ? 0 : Math.sqrt(1 - abTo);
+  P.x = P.x.map(x => { const { eps, x0 } = guided(x, tFrom, s); return [saTo * x0[0] + sqTo * eps[0], saTo * x0[1] + sqTo * eps[1]]; });
+  P.i++;
+}
+function freshParticles(s) {
+  const r = rng("samples:" + s.seed), ts = [];
+  for (let k = 0; k <= s.steps; k++) ts.push(Math.round(T - k * T / s.steps));
+  return { ts, i: 0, x: Array.from({ length: NS }, () => [gauss(r), gauss(r)]) };
+}
+function memorised(s, P) {
+  const pts = cachedData(s.data); let hit = 0;
+  for (const x of P.x) { let best = Infinity; for (const p of pts) { const d = (x[0] - p.x) ** 2 + (x[1] - p.y) ** 2; if (d < best) best = d; } if (best < 0.03 ** 2) hit++; }
+  return hit / P.x.length;
+}
+/* training loss at t: mean squared error of ε̂ vs the ε actually used */
+function lossAt(s) {
+  const cloud = forwardCloud(s), pts = cachedData(s.data); let se = 0;
+  cloud.forEach(q => { const { eps } = denoise([q.x, q.y], s.t, pts, s.smooth, null); se += (eps[0] - q.e[0]) ** 2 + (eps[1] - q.e[1]) ** 2; });
+  return se / cloud.length / 2;
+}
+
+/* ============================================================================
+   2. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const pct = v => (v * 100).toFixed(0) + "%";
+
+const REGISTRY = {
+  "t": (s, args) => { const t = +args[0]; if (!(t >= 0 && t <= T)) return fail(`t must be 0–${T}`); const c = clone(s); c.t = t; const ab = abar(t);
+    return { state: c, out: [line(`t = ${t}: ᾱ = ${ab.toFixed(3)} → x_t = ${Math.sqrt(ab).toFixed(2)}·x₀ + ${Math.sqrt(1 - ab).toFixed(2)}·ε`, "mod")] }; },
+  "noise": s => { const c = clone(s); c.seed++; return { state: c, out: [line("fresh ε for every point — the schedule is the same, the noise is new", "dim")] }; },
+  "field": (s, args) => { if (!/^(on|off)$/.test(args[0] || "")) return fail("usage: field on|off"); const c = clone(s); c.field = args[0] === "on";
+    return { state: c, out: [line(c.field ? "showing the model's guess: at each grid point, the direction to its estimate of x₀" : "field hidden", "mod")] }; },
+  "smooth": (s, args) => { const v = parseFloat(args[0]); if (!(v >= 0.5 && v <= 8)) return fail("smooth must be 0.5–8 (1 = exact denoiser)"); const c = clone(s); c.smooth = v;
+    return { state: c, out: [line(`kernel width ×${v}: ${v === 1 ? "the exact Bayes denoiser — it knows every training point" : v > 1 ? "a blurrier model — it averages over neighbours it can't tell apart" : "sharper than exact (over-confident)"}`, "mod")] }; },
+  "steps": (s, args) => { const n = +args[0]; if (!(n >= 1 && n <= T)) return fail(`steps must be 1–${T}`); const c = clone(s); c.steps = n; c.particles = null;
+    return { state: c, out: [line(`sampling will take ${n} step(s) from t=${T} to 0 — particles reset`, "mod")] }; },
+  "guide": (s, args) => { const cls = (args[0] || "").toUpperCase(), st = parseFloat(args[1]);
+    if (cls === "OFF") { const c = clone(s); c.guide = { cls: null, s: 0 }; return { state: c, out: [line("unconditional", "mod")] }; }
+    if (!/^[AB]$/.test(cls) || !(st >= 0 && st <= 6)) return fail("usage: guide A|B <strength 0–6>  |  guide off");
+    const c = clone(s); c.guide = { cls: cls === "A" ? 0 : 1, s: st };
+    return { state: c, out: [line(`guidance toward class ${cls}, strength ${st}: ε̂ = ε̂ᵤ + ${st}·(ε̂_${cls} − ε̂ᵤ)`, cls === "A" ? "a" : "b"),
+      line(st === 0 ? "strength 0 is the unconditional model" : st === 1 ? "strength 1 is the plain conditional model" : "above 1 extrapolates past the conditional model — sharper, less diverse", "dim")] }; },
+  "data": (s, args) => { const d = args[0]; if (!DATASETS[d]) return fail(`data must be one of: ${Object.keys(DATASETS).join(", ")}`); const c = clone(s); c.data = d; c.particles = null;
+    return { state: c, out: [line(`training set: ${d} (${NP} points, two classes)`, "ok")] }; },
+  "reset": s => { const c = clone(s); c.particles = freshParticles(c); return { state: c, out: [line(`${NS} samples drawn from N(0, I) at t=${T}. They know nothing yet.`, "dim")] }; },
+  "step": s => { const c = clone(s); if (!c.particles) c.particles = freshParticles(c); const P = c.particles;
+    if (P.i >= P.ts.length - 1) return { out: [line("already at t=0 — reset to sample again", "dim")] };
+    const from = P.ts[P.i]; reverseStep(c, P);
+    return { state: c, out: [line(`t ${from} → ${P.ts[P.i]}: predicted ε̂ for every sample, removed ${(1 - abar(P.ts[P.i]) / abar(from) > 0 ? "" : "")}a slice of it, re-added the noise the schedule says should remain`, "add")] }; },
+  "sample": s => { const c = clone(s); if (!c.particles || c.particles.i >= c.particles.ts.length - 1) c.particles = freshParticles(c); const P = c.particles;
+    const from = P.ts[P.i]; let k = 0; while (P.i < P.ts.length - 1) { reverseStep(c, P); k++; }
+    const m = memorised(c, P);
+    return { state: c, out: [line(`${k} step(s) from t=${from} to 0`, "add"),
+      line(`${pct(m)} of samples sit on top of a training point (within 0.03)${m > 0.8 ? " — the model has memorised the data" : m < 0.3 ? " — the model is generating in-between points" : ""}`, m > 0.8 ? "err" : "dim")] }; },
+  "schedule": s => ({ out: [line("t     ᾱ_t    signal  noise", "dim"), ...[0, 5, 10, 20, 30, 40, 50].map(t => line(`${String(t).padStart(2)}   ${abar(t).toFixed(3)}   ${Math.sqrt(abar(t)).toFixed(2)}    ${Math.sqrt(1 - abar(t)).toFixed(2)}`, t === s.t ? "mod" : "ok"))] }),
+  "loss": s => { const l = lossAt(s); return { out: [line(`training loss at t=${s.t}, smoothness ×${s.smooth}: mean ‖ε̂ − ε‖² = ${l.toFixed(3)}`, "mod"),
+    line("training = draw x₀, draw t, draw ε, make x_t, ask the model for ε̂, push it toward ε. That's the entire objective.", "dim")] }; },
+  "help": () => ({ out: [
+    line("t N · noise · field on|off        the forward process (left)", "ok"),
+    line("reset · step · sample             the reverse process (right)", "ok"),
+    line("steps N                           how many reverse steps (DDIM)", "ok"),
+    line("guide A|B <s> · guide off         classifier-free guidance", "ok"),
+    line("smooth X                          model kernel width (1 = exact)", "ok"),
+    line("data moons|ring|smile · schedule · loss · restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase();
+  if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   3. RENDERER — canvas for points, svg for the schedule
+   ========================================================================= */
+const W = 480, Hc = 400, SC = 150, CX = W / 2, CY = Hc / 2;
+const px = x => CX + x * SC, py = y => CY - y * SC;
+const col = { a: "#5cc8d6", b: "#e07aa8", guess: "#e8a33d", sample: "#6fbf73", dim: "#8fa0b0", faint: "#5d6d7c", line: "#2e3a47" };
+
+function drawFrame(ctx, t) {
+  ctx.fillStyle = "#12181f"; ctx.fillRect(0, 0, W, Hc);
+  ctx.strokeStyle = col.line; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px(-1.4), py(0)); ctx.lineTo(px(1.4), py(0)); ctx.moveTo(px(0), py(-1.3)); ctx.lineTo(px(0), py(1.3)); ctx.stroke();
+  /* the N(0,1) reference: one and two standard deviations */
+  ctx.setLineDash([3, 4]); ctx.strokeStyle = "rgba(93,109,124,.5)";
+  [1, 2].forEach(r => { ctx.beginPath(); ctx.arc(CX, CY, r * SC, 0, 2 * Math.PI); ctx.stroke(); });
+  ctx.setLineDash([]);
+}
+function drawField(ctx, s, t) {
+  const n = 13; ctx.strokeStyle = col.guess; ctx.lineWidth = 1.2;
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    const x = -1.3 + 2.6 * i / (n - 1), y = -1.2 + 2.4 * j / (n - 1);
+    const { x0 } = guided([x, y], Math.max(t, 1), s);
+    let dx = x0[0] - x, dy = x0[1] - y; const L = Math.hypot(dx, dy) || 1e-9; const len = Math.min(0.16, L * 0.35);
+    dx = dx / L * len; dy = dy / L * len;
+    ctx.globalAlpha = 0.35 + 0.5 * Math.min(1, L); ctx.beginPath(); ctx.moveTo(px(x), py(y)); ctx.lineTo(px(x + dx), py(y + dy)); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px(x + dx), py(y + dy), 1.6, 0, 2 * Math.PI); ctx.fillStyle = col.guess; ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function render(s) {
+  const ab = abar(s.t);
+  /* forward */
+  const f = document.getElementById("fwd").getContext("2d");
+  drawFrame(f, s.t);
+  if (s.field) drawField(f, s, s.t);
+  forwardCloud(s).forEach(q => { f.fillStyle = q.c ? col.b : col.a; f.globalAlpha = 0.85; f.beginPath(); f.arc(px(q.x), py(q.y), 2.6, 0, 2 * Math.PI); f.fill(); });
+  f.globalAlpha = 1;
+  d3.select("#fwd-st").text(`t=${s.t} · signal ${pct(Math.sqrt(ab))} · noise ${pct(Math.sqrt(1 - ab))}`);
+  document.getElementById("tslider").value = s.t; d3.select("#tval").text(s.t);
+  d3.select("#fieldbtn").classed("on", s.field);
+
+  /* reverse */
+  const r = document.getElementById("rev").getContext("2d");
+  const P = s.particles; const tcur = P ? P.ts[P.i] : T;
+  drawFrame(r, tcur);
+  const pts = cachedData(s.data);
+  r.globalAlpha = 0.18; pts.forEach(p => { r.fillStyle = p.c ? col.b : col.a; r.beginPath(); r.arc(px(p.x), py(p.y), 2, 0, 2 * Math.PI); r.fill(); }); r.globalAlpha = 1;
+  if (P) {
+    if (s.field && tcur > 0) { r.strokeStyle = col.guess; r.lineWidth = 0.8; r.globalAlpha = 0.5;
+      P.x.forEach((x, k) => { if (k % 3) return; const { x0 } = guided(x, tcur, s); r.beginPath(); r.moveTo(px(x[0]), py(x[1])); r.lineTo(px(x0[0]), py(x0[1])); r.stroke(); }); r.globalAlpha = 1; }
+    const done = tcur === 0;
+    P.x.forEach(x => { r.fillStyle = done ? col.sample : col.dim; r.globalAlpha = done ? 0.9 : 0.7; r.beginPath(); r.arc(px(x[0]), py(x[1]), done ? 2.8 : 2.2, 0, 2 * Math.PI); r.fill(); });
+    r.globalAlpha = 1;
+    d3.select("#rev-st").text(`t=${tcur} · step ${P.i}/${P.ts.length - 1}${done ? " · done" : ""}`);
+  } else d3.select("#rev-st").text("no samples yet — reset, then step or sample");
+  d3.select("#stepsv").text(s.steps);
+  d3.select("#guidev").text(s.guide.cls === null ? "off" : `${s.guide.cls ? "B" : "A"} ×${s.guide.s}`);
+  d3.select("#bwv").text("×" + s.smooth);
+
+  /* schedule */
+  const svg = d3.select("#schedsvg"), xs = t => 40 + t / T * 940, ys = v => 12 + (1 - v) * 78;
+  const lineA = d3.line().x(t => xs(t)).y(t => ys(abar(t)));
+  const lineN = d3.line().x(t => xs(t)).y(t => ys(Math.sqrt(1 - abar(t))));
+  svg.html(`
+    <path class="ab" d="${lineA(d3.range(0, T + 1))}"/><path class="nz" d="${lineN(d3.range(0, T + 1))}"/>
+    <line class="tmark" x1="${xs(s.t)}" x2="${xs(s.t)}" y1="8" y2="96"/>
+    ${P ? `<line class="smark" x1="${xs(tcur)}" x2="${xs(tcur)}" y1="8" y2="96"/>` : ""}
+    <text x="40" y="106">t=0 · data</text><text x="980" y="106" text-anchor="end">t=${T} · noise</text>
+    <text x="${xs(s.t) + 4}" y="20" fill="#e8a33d">forward t=${s.t}</text>
+    ${P ? `<text x="${xs(tcur) + 4}" y="32" fill="#6fbf73">samples at t=${tcur}</text>` : ""}
+    <text x="44" y="${ys(1) + 10}" fill="#5cc8d6">ᾱ (signal)</text><text x="900" y="${ys(1) + 10}" text-anchor="end">√(1−ᾱ) (noise)</text>`);
+  const mem = P && tcur === 0 ? memorised(s, P) : null;
+  d3.select("#stats").html(`
+    <div><div class="k">forward t</div><div class="v g">${s.t}</div></div>
+    <div><div class="k">ᾱ<sub>t</sub></div><div class="v">${ab.toFixed(3)}</div></div>
+    <div><div class="k">x<sub>t</sub> =</div><div class="v" style="font-size:12px">${Math.sqrt(ab).toFixed(2)}·x₀ + ${Math.sqrt(1 - ab).toFixed(2)}·ε</div></div>
+    <div><div class="k">samples at</div><div class="v s">${P ? "t=" + tcur : "—"}</div></div>
+    <div><div class="k">on a training point</div><div class="v ${mem !== null && mem > 0.8 ? "b" : ""}">${mem === null ? "—" : pct(mem)}</div></div>`);
+}
+
+/* ============================================================================
+   4. LESSON
+   ========================================================================= */
+const Pt = s => s.particles;
+const done = s => Pt(s) && Pt(s).i >= Pt(s).ts.length - 1;
+
+const LESSON = [
+  { title: "The data is a distribution",
+    body: `Two hundred points in two classes: two interleaved moons. This is the whole training
+    set. The job is to build a machine that produces <em>new</em> points that could have come
+    from the same place. Look at t = 0: nothing has happened yet.`,
+    try: "t 0", expect: /^t 0$/, readonly: true,
+    needs: s => s.data === "moons" && s.t === 0 },
+
+  { title: "Forward: add a little noise",
+    body: `Slide to t = 10. Every point moves by a random amount. The recipe is one line:
+    <code>x_t = √ᾱ_t · x₀ + √(1−ᾱ_t) · ε</code>, with ε drawn from a unit Gaussian. ᾱ_t comes
+    from a fixed schedule. Nobody learns anything in this half.`,
+    try: "t 10", expect: /^t 10$/,
+    needs: s => s.data === "moons" && s.t !== 10 },
+
+  { title: "Forward: all the way",
+    body: `At t = 50 the moons are gone. What's left is indistinguishable from a Gaussian — the
+    dashed circles are its one and two standard deviations. This is the point: the end of the
+    forward process is something we can sample from without knowing anything about the data.`,
+    try: "t 50", expect: /^t 50$/,
+    needs: s => s.data === "moons" && s.t !== 50 },
+
+  { title: "The schedule",
+    body: `The curve is ᾱ_t: how much of the original signal survives at each t. It starts at 1
+    and falls to almost 0. Both halves of the model read this table and nothing else. Change the
+    schedule and you change how fast the data dies and how the reverse steps are sized.`,
+    try: "schedule", expect: /^schedule$/, readonly: true },
+
+  { title: "The one thing that is learned",
+    body: `Go to t = 25 and turn the field on. Each amber arrow is the model's answer to one
+    question: <strong>from this noisy point, which way is the data?</strong> Formally it
+    predicts ε (the noise that was added), which is the same information as predicting x₀. That
+    prediction, as a function of (x_t, t), is the entire model.`,
+    try: "t 25", expect: /^t 25$/,
+    needs: s => s.data === "moons" && s.t !== 25 },
+
+  { title: "…field on",
+    body: `Arrows point toward the moons everywhere, more confidently near them.`,
+    try: "field on", expect: /^field on$/,
+    needs: s => !s.field && s.t === 25 },
+
+  { title: "Training is a comparison",
+    body: `The training loop: pick a data point, pick a random t, add noise with the recipe, ask
+    the model for ε̂, and nudge it toward the ε you actually used. The loss is the squared
+    distance between the two. That's it — no adversary, no likelihood, no tricks.`,
+    try: "loss", expect: /^loss$/, readonly: true,
+    needs: s => s.field && s.t === 25 },
+
+  { title: "Reverse: start from pure noise",
+    body: `Three hundred samples drawn from the Gaussian. They are at t = 50 and know nothing
+    about moons. The training points are shown faintly so you can see where they need to go.`,
+    try: "reset", expect: /^reset$/,
+    needs: s => s.field && !Pt(s) },
+
+  { title: "One step back",
+    body: `For each sample: ask the model for ε̂, use it to estimate x₀, then move to where a
+    point with that x₀ would be at t = 49 according to the schedule. The amber lines are the
+    x₀ estimates — wild at this noise level, and that's fine: only one step of the estimate is
+    trusted.`,
+    try: "step", expect: /^step$/,
+    needs: s => Pt(s) && Pt(s).i === 0 },
+
+  { title: "Run it to the end",
+    body: `Forty-nine more of the same step. The samples land on the moons. Generation is the
+    denoiser applied repeatedly, each time trusting its own guess a little more because the
+    schedule says less noise remains.`,
+    try: "sample", expect: /^sample$/,
+    needs: s => Pt(s) && Pt(s).i > 0 && !done(s) },
+
+  { title: "The perfect denoiser memorises",
+    body: `Look at the stat: nearly every sample sits exactly on a training point. This model
+    is the mathematically ideal noise predictor for these 220 points, and the ideal answer to
+    "which way is the data?" is always "toward a point you've seen". A network that could fit
+    the data perfectly would do the same. Generalisation comes from <em>not</em> being able to.`,
+    try: "smooth 5", expect: /^smooth 5$/,
+    needs: s => done(s) && s.smooth === 1 },
+
+  { title: "A blurrier model invents",
+    body: `Sample again with a wider kernel — a stand-in for a network that averages over
+    neighbours it can't tell apart. The samples now fill the moons instead of snapping to the
+    dots. Less accurate denoising, more useful generator.`,
+    try: "sample", expect: /^sample$/,
+    needs: s => s.smooth === 5 && done(s) },
+
+  { title: "Fewer steps",
+    body: `DDIM lets you skip. Five steps instead of fifty: each step trusts the x₀ estimate
+    for a much bigger jump.`,
+    try: "steps 5", expect: /^steps 5$/,
+    needs: s => s.smooth === 5 && s.steps === 50 },
+
+  { title: "…sample",
+    body: `Faster and rougher. Points drift off the moons because early estimates were made at
+    noise levels where the model can only see a blur. Speed versus fidelity is this one number.`,
+    try: "sample", expect: /^sample$/,
+    needs: s => s.steps === 5 && (!Pt(s) || !done(s)) },
+
+  { title: "Back to fifty",
+    body: `Restore the step count.`,
+    try: "steps 50", expect: /^steps 50$/,
+    needs: s => s.steps !== 50 },
+
+  { title: "Guidance: ask for one class",
+    body: `Classifier-free guidance. A second denoiser sees only class A's points; the sampler
+    uses ε̂ = ε̂ᵤ + s·(ε̂_A − ε̂ᵤ). At strength 1 that is simply the conditional model.`,
+    try: "guide A 1", expect: /^guide a 1$/i,
+    needs: s => s.steps === 50 && s.guide.cls === null },
+
+  { title: "…sample",
+    body: `Only the cyan moon. The same noise, the same schedule, the same steps — just a
+    different arrow at each one.`,
+    try: "sample", expect: /^sample$/,
+    needs: s => s.guide.cls === 0 && s.guide.s === 1 && (!Pt(s) || !done(s)) },
+
+  { title: "Turn it up",
+    body: `Strength 4 extrapolates past the conditional model. The samples bunch into the most
+    typical part of the class and diversity drops. This is the knob behind every "guidance
+    scale" setting: higher means more on-prompt and less varied.`,
+    try: "guide A 4", expect: /^guide a 4$/i,
+    needs: s => s.guide.cls === 0 && s.guide.s === 1 },
+
+  { title: "…sample",
+    body: `Compare the spread with strength 1.`,
+    try: "sample", expect: /^sample$/,
+    needs: s => s.guide.cls === 0 && s.guide.s === 4 && (!Pt(s) || !done(s)) },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>data smile</code> with guidance toward
+    class B (the mouth), <code>steps 1</code> to watch every sample collapse onto the single
+    average point, or <code>smooth 8</code> for a model too blurry to find the moons at all.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   5. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("tslider").addEventListener("input", e => run(`t ${e.target.value}`));
+document.getElementById("fieldbtn").onclick = () => run(`field ${state.field ? "off" : "on"}`);
+document.getElementById("resetbtn").onclick = () => run("reset");
+document.getElementById("stepbtn").onclick = () => run("step");
+document.getElementById("samplebtn").onclick = () => run("sample");
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Diffusion sandbox loaded. Drag the slider, or type 'help'.", "dim");
+</script>
+</body>
+</html>

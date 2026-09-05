@@ -102,8 +102,13 @@ const VIZ = [
     blurb: `Pick a token, a layer, a head. Scores become weights, weights mix vectors into a
             residual stream. Meet the sink, duplicate, induction and pronoun heads, then see
             what the KV cache saves.` },
-  { topic: "ml", status: "planned", title: "Diffusion models",
-    blurb: `Adding noise forward, learning to remove it backward.` }
+  { topic: "ml", path: "ai/diffusion.html", title: "Noise forward, learn the way back",
+    blurb: `A fixed schedule destroys the data; one learned function undoes a step. Sample it
+            backwards, skip steps, steer it with guidance, and see why a perfect denoiser
+            only memorises.` },
+  { topic: "ml", status: "planned", title: "Post-training",
+    blurb: `Pretrained to SFT to preference tuning: what each stage changes about the same
+            prompt, and why RLHF is a preference signal rather than more facts.` }
 ];
 
 /* --------------------------------------------------------------------------- */
