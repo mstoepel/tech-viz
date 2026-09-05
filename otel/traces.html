@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traces and context propagation — an OpenTelemetry sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   One colour per service so a span's owner is instant. Amber marks the
+   header in flight. Red is an error or a dropped header. Faded means the
+   span exists but was never exported (unsampled).
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --gw:#b08be8; --ord:#5cc8d6; --pay:#6fbf73; --hdr:#e8a33d; --bad:#e06c6c; --dead:#3f4c59;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--hdr)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--gw);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--gw);color:var(--gw)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--gw);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the chain of services with the header drawn on each hop,
+   and underneath, the waterfall that chain produced. When a hop drops the
+   header, the waterfall splits. That split is the whole page.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.topo{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;align-items:center;gap:6px;padding:14px 12px}
+.svc{border:1px solid var(--line);border-radius:var(--r);padding:8px 10px;background:var(--bg);font-family:var(--code);font-size:11px;transition:border-color .3s}
+.svc .n{font-family:var(--mono);font-weight:700;font-size:12px;margin-bottom:4px}
+.svc.gateway .n{color:var(--gw)} .svc.orders .n{color:var(--ord)} .svc.payments .n{color:var(--pay)}
+.svc .f{display:flex;flex-wrap:wrap;gap:4px 8px;color:var(--ink-faint)}
+.svc .f b{font-weight:400;color:var(--ink-dim)}
+.svc .f .off{color:var(--bad)} .svc .f .on{color:var(--pay)}
+.svc.dark{border-style:dashed;opacity:.7}
+.svc.failing{border-color:var(--bad)}
+.hop{font-family:var(--code);font-size:10px;text-align:center;color:var(--hdr);min-width:92px}
+.hop .arrow{color:var(--ink-faint);font-size:14px;line-height:1}
+.hop .chip{display:inline-block;border:1px solid var(--hdr);border-radius:999px;padding:1px 7px;margin-top:2px}
+.hop.none .chip{border-color:var(--bad);color:var(--bad);text-decoration:line-through}
+.hop.none{color:var(--bad)}
+.hop .sub{color:var(--ink-faint);font-size:9.5px;margin-top:2px}
+
+.stage{display:grid;grid-template-columns:1fr 300px;gap:12px;margin-top:12px;align-items:start}
+.wf{padding:10px 12px;display:flex;flex-direction:column;gap:14px;min-height:120px}
+.trace .th{font-family:var(--code);font-size:11px;color:var(--ink-dim);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.trace .th .tid{color:var(--hdr)} .trace .th .tid b{font-weight:400;color:var(--ink-faint)}
+.trace.orphan .th .tid{color:var(--bad)}
+.trace.unsampled{opacity:.4}
+.trace .rows{display:grid;grid-template-columns:200px 1fr;row-gap:3px;column-gap:8px;align-items:center}
+.span .lbl{font-family:var(--code);font-size:11px;color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.span .lbl i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.span .lbl .k{color:var(--ink-faint);font-size:10px}
+.span .track{position:relative;height:16px;background:rgba(46,58,71,.35);border-radius:2px}
+.span .bar{position:absolute;top:2px;height:12px;border-radius:2px;opacity:.85;transition:left .4s,width .4s;
+  font-family:var(--code);font-size:9.5px;line-height:12px;padding-left:4px;color:#12181f;white-space:nowrap;overflow:hidden}
+.span.error .bar{outline:1.5px solid var(--bad);outline-offset:1px}
+.span.error .lbl{color:var(--bad)}
+.span.gateway .bar,.span.gateway .lbl i{background:var(--gw)} .span.orders .bar,.span.orders .lbl i{background:var(--ord)} .span.payments .bar,.span.payments .lbl i{background:var(--pay)}
+.span.gap .bar{background:repeating-linear-gradient(45deg,var(--dead),var(--dead) 4px,transparent 4px,transparent 8px);color:var(--ink-dim)}
+.axis{font-family:var(--code);font-size:9.5px;color:var(--ink-faint);display:flex;justify-content:space-between;grid-column:2;margin-top:2px}
+.wf .none{font-family:var(--code);font-size:11.5px;color:var(--ink-faint)}
+.hdrs{padding:8px 12px;font-family:var(--code);font-size:11px;display:flex;flex-direction:column;gap:8px}
+.hdrs .h{border:1px solid var(--line);border-radius:var(--r);padding:6px 8px;background:var(--bg)}
+.hdrs .h .t{color:var(--ink-faint);font-size:10px;margin-bottom:3px}
+.hdrs .h .v{word-break:break-all;color:var(--ink-dim)}
+.hdrs .h .v .ver{color:var(--ink-faint)} .hdrs .h .v .tid{color:var(--hdr)} .hdrs .h .v .sid{color:var(--ink)} .hdrs .h .v .fl{color:var(--pay)}
+.hdrs .h .v .fl.off{color:var(--bad)}
+.hdrs .h.none .v{color:var(--bad)}
+.hdrs .legend{font-size:10px;color:var(--ink-faint);line-height:1.6}
+.logs{padding:8px 12px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line);line-height:1.6}
+.logs .tid{color:var(--hdr)} .logs .no{color:var(--bad)}
+.logs .cap2{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:4px}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--gw)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--pay)} .log .mod{color:var(--hdr)} .log .err{color:var(--bad)}
+.log .g{color:var(--gw)} .log .o{color:var(--ord)} .log .p{color:var(--pay)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--gw)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:820px){
+  .stage{grid-template-columns:1fr}
+  .topo{grid-template-columns:1fr;gap:8px}
+  .hop .arrow{transform:rotate(90deg);display:inline-block}
+  .trace .rows{grid-template-columns:140px 1fr}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 01 · Observability</p>
+  <h1>A trace is one id, carried in a <em>header</em>, that nobody is allowed to drop</h1>
+  <p class="standfirst">Three services handle one request. Each records what it did as spans.
+  The only thing that turns those spans into a single trace is a tiny header each service must
+  forward to the next. Send requests, break the chain in different places, and watch what the
+  tracing backend would show you.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="box">
+    <div class="cap"><span>The request path · gateway → orders → payments</span><span class="st" id="cfgnote"></span></div>
+    <div class="topo" id="topo"></div>
+  </div>
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>What the tracing backend shows</span><span class="st" id="wfnote"></span></div>
+      <div class="wf" id="wf"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>The header, hop by hop</span></div>
+      <div class="hdrs" id="hdrs"></div>
+      <div class="logs" id="logs"></div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="request">
+    </div>
+  </div>
+  <p class="hintbar"><code>request</code> · <code>propagate off orders</code> · <code>instrument off payments</code> ·
+  <code>slow payments 800</code> · <code>fail payments</code> · <code>sample 0</code> · <code>logs</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. A request is simulated
+    as a recursive call down the chain; each service, if it has an SDK, opens a server span,
+    an internal span for its own work, and a client span for the outgoing call, and forwards a
+    W3C <code>traceparent</code> header only if it is configured to. Sampling is head-based: the
+    root decides, the flag rides in the header. Timings are illustrative.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE
+   cfg: per-service knobs — sdk (instrumented), propagate (forwards the
+   header), work/internal latency, fail. rate: the root sampler.
+   last: the most recent request — spans, hops (headers), logs.
+   ========================================================================= */
+const CHAIN = ["gateway", "orders", "payments"];
+const NEXT = { gateway: "orders", orders: "payments", payments: null };
+const INTERNAL = { gateway: "auth check", orders: "SELECT order", payments: "charge card" };
+const ROUTE = { gateway: "GET /checkout", orders: "POST /orders", payments: "POST /charge" };
+function hashStr(str) { let h = 0x811c9dc5; for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h; }
+const hexOf = (seed, len) => { let out = ""; let i = 0; while (out.length < len) out += hashStr(seed + ":" + i++).toString(16).padStart(8, "0"); return out.slice(0, len); };
+
+function initialState() {
+  return {
+    cfg: {
+      gateway:  { sdk: true, propagate: true, work: 12, internal: 18, fail: false },
+      orders:   { sdk: true, propagate: true, work: 10, internal: 35, fail: false },
+      payments: { sdk: true, propagate: true, work: 8,  internal: 40, fail: false }
+    },
+    rate: 1, seq: 0, last: null, history: []
+  };
+}
+const clone = s => structuredClone(s);
+const short = id => id.slice(0, 8) + "…";
+
+/* ----------------------------------------------------------------------------
+   The request. Pure: (cfg, rate, seq) → {spans, hops, logs, total, status}.
+   Every span is created here; whether it ever *reaches* a backend is the
+   sampled flag. Every hop records exactly what header was on the wire.
+   ------------------------------------------------------------------------- */
+function simulate(cfg, rate, seq) {
+  const spans = [], hops = [], logs = [];
+  let n = 0;
+  const sid = () => hexOf(`${seq}:${n++}`, 16);
+  const decide = svc => (hashStr(`${seq}:${svc}:sample`) % 1000) < rate * 1000;
+
+  function serve(name, incoming, t0) {
+    const c = cfg[name];
+    let ctx = null, server = null, t = t0;
+    if (c.sdk) {
+      ctx = incoming
+        ? { traceId: incoming.traceId, parentId: incoming.spanId, sampled: incoming.sampled, root: false }
+        : { traceId: hexOf(`${seq}:${name}:trace`, 32), parentId: null, sampled: name === "gateway" ? decide(name) : true, root: true, orphan: name !== "gateway" };
+      server = { id: sid(), traceId: ctx.traceId, parentId: ctx.parentId, service: name, name: ROUTE[name], kind: "server", start: t0, sampled: ctx.sampled, orphanRoot: ctx.orphan };
+      spans.push(server);
+    }
+    t += c.work;
+    if (c.sdk) { spans.push({ id: sid(), traceId: ctx.traceId, parentId: server.id, service: name, name: INTERNAL[name], kind: "internal", start: t, end: t + c.internal, sampled: ctx.sampled, status: c.fail ? "error" : "ok" }); }
+    t += c.internal;
+    let status = c.fail ? "error" : "ok";
+    logs.push({ service: name, text: c.fail ? `${INTERNAL[name]} failed: upstream declined` : `${INTERNAL[name]} ok`, traceId: c.sdk ? ctx.traceId : null, level: c.fail ? "error" : "info" });
+    const nxt = NEXT[name];
+    if (nxt && !c.fail) {
+      let client = null;
+      if (c.sdk) { client = { id: sid(), traceId: ctx.traceId, parentId: server.id, service: name, name: `→ ${nxt}`, kind: "client", start: t, sampled: ctx.sampled }; spans.push(client); }
+      const header = (c.sdk && c.propagate) ? { traceId: ctx.traceId, spanId: client.id, sampled: ctx.sampled } : null;
+      hops.push({ from: name, to: nxt, header, reason: !c.sdk ? "no SDK, so nothing to forward" : !c.propagate ? "SDK present but propagation disabled" : "" });
+      const r = serve(nxt, header, t);
+      t = r.end;
+      if (client) { client.end = t; client.status = r.status; client.httpStatus = r.status === "error" ? 500 : 200; }
+      if (r.status === "error") status = "error";
+    }
+    t += 6;
+    if (server) { server.end = t; server.status = status; server.httpStatus = status === "error" ? 500 : 200; }
+    return { end: t, status };
+  }
+  const r = serve("gateway", null, 0);
+  return { spans, hops, logs, total: r.end, status: r.status, seq };
+}
+
+/* ============================================================================
+   2. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const svcArg = a => CHAIN.includes(a) ? a : null;
+const C = { gateway: "g", orders: "o", payments: "p" };
+
+const REGISTRY = {
+  "request": s => {
+    const n = clone(s); n.seq++;
+    const r = simulate(n.cfg, n.rate, n.seq);
+    n.last = r;
+    const traces = [...new Set(r.spans.map(x => x.traceId))];
+    const exported = r.spans.filter(x => x.sampled);
+    n.history.push({ seq: n.seq, traces: traces.length, spans: r.spans.length, exported: exported.length, total: r.total, status: r.status });
+    const out = [line(`request #${n.seq}: ${r.status === "ok" ? "200" : "500"} in ${r.total}ms · ${r.spans.length} span(s) created`, r.status === "ok" ? "ok" : "err")];
+    r.hops.forEach(h => out.push(line(`  ${h.from} → ${h.to}: ${h.header ? `traceparent 00-${short(h.header.traceId)}-${short(h.header.spanId)}-${h.header.sampled ? "01" : "00"}` : `no traceparent (${h.reason})`}`, h.header ? "mod" : "err")));
+    if (traces.length > 1) out.push(line(`  backend sees ${traces.length} separate traces — the link was lost at a hop above`, "err"));
+    if (!exported.length) out.push(line(`  sampled=0: spans were created but none were exported. The backend shows nothing.`, "dim"));
+    else if (exported.length < r.spans.length) out.push(line(`  ${exported.length}/${r.spans.length} spans exported — the rest carried sampled=0`, "mod"));
+    return { state: n, out };
+  },
+  "propagate": (s, args) => {
+    const [what, svc] = args;
+    if (!/^(on|off)$/.test(what || "") || !svcArg(svc)) return fail("usage: propagate on|off gateway|orders|payments");
+    const n = clone(s); n.cfg[svc].propagate = what === "on";
+    return { state: n, out: [line(`${svc} will ${what === "on" ? "forward" : "drop"} traceparent on outgoing calls`, what === "on" ? "add" : "err"),
+      line("nothing changes until the next request", "dim")] };
+  },
+  "instrument": (s, args) => {
+    const [what, svc] = args;
+    if (!/^(on|off)$/.test(what || "") || !svcArg(svc)) return fail("usage: instrument on|off gateway|orders|payments");
+    const n = clone(s); n.cfg[svc].sdk = what === "on";
+    return { state: n, out: [line(`${svc} SDK ${what}`, what === "on" ? "add" : "err"),
+      line(what === "on" ? "it will record spans and forward the header again" : "no spans, no header forwarding, no trace id on its logs — it's a black box now", "dim")] };
+  },
+  "slow": (s, args) => {
+    const [svc, ms] = args;
+    if (!svcArg(svc) || !(+ms >= 0)) return fail("usage: slow <service> <ms>");
+    const n = clone(s); n.cfg[svc].internal = +ms;
+    return { state: n, out: [line(`${svc}'s "${INTERNAL[svc]}" now takes ${ms}ms`, "mod")] };
+  },
+  "fail": (s, args) => {
+    const [svc, what] = args;
+    if (!svcArg(svc)) return fail("usage: fail <service> [off]");
+    const n = clone(s); n.cfg[svc].fail = what !== "off";
+    return { state: n, out: [line(`${svc} will ${n.cfg[svc].fail ? "return 500" : "succeed"}`, n.cfg[svc].fail ? "err" : "add")] };
+  },
+  "fix": (s, args) => REGISTRY["fail"](s, [args[0], "off"]),
+  "sample": (s, args) => {
+    const v = parseFloat(args[0]);
+    if (!(v >= 0 && v <= 1)) return fail("usage: sample <0..1>   (probability the gateway samples a new trace)");
+    const n = clone(s); n.rate = v;
+    return { state: n, out: [line(`root sampler: ${v * 100}% of new traces will be exported`, "mod"),
+      line("the decision is made once at the root and travels in the header's flags byte", "dim")] };
+  },
+  "headers": s => {
+    if (!s.last) return { out: [line("no request yet", "dim")] };
+    return { out: s.last.hops.map(h => line(`${h.from} → ${h.to}: ${h.header ? `traceparent: 00-${h.header.traceId}-${h.header.spanId}-${h.header.sampled ? "01" : "00"}` : `(no traceparent — ${h.reason})`}`, h.header ? "mod" : "err"))
+      .concat([line("format: version-traceId(32 hex)-parentSpanId(16 hex)-flags(01 = sampled)", "dim")]) };
+  },
+  "logs": s => {
+    if (!s.last) return { out: [line("no request yet", "dim")] };
+    return { out: s.last.logs.map(l => line(`[${l.service}] ${l.level.padEnd(5)} ${l.text}${l.traceId ? `  trace_id=${short(l.traceId)}` : "  (no trace_id)"}`, l.level === "error" ? "err" : C[l.service]))
+      .concat([line("the SDK stamps the active span's trace id on every log line — that's all log/trace correlation is", "dim")]) };
+  },
+  "spans": s => {
+    if (!s.last) return { out: [line("no request yet", "dim")] };
+    return { out: s.last.spans.map(x => line(`${short(x.traceId)} ${x.parentId ? short(x.parentId) : "root    "} → ${x.id.slice(0, 8)}  ${x.service.padEnd(9)} ${x.kind.padEnd(8)} ${x.name.padEnd(26)} ${x.start}–${x.end}ms ${x.status === "error" ? "ERROR" : ""}${x.sampled ? "" : " (not exported)"}`, x.status === "error" ? "err" : C[x.service])) };
+  },
+  "help": () => ({ out: [
+    line("request                      send one request through the chain", "mod"),
+    line("propagate on|off <svc>       forward or drop traceparent on outgoing calls", "ok"),
+    line("instrument on|off <svc>      give a service an SDK, or take it away", "ok"),
+    line("slow <svc> <ms> · fail <svc> [off] · fix <svc>", "ok"),
+    line("sample <0..1>                root sampling probability", "ok"),
+    line("headers · spans · logs       inspect the last request", "ok"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase();
+  if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1).map(x => x.toLowerCase()), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   3. RENDERER
+   ========================================================================= */
+function render(s) {
+  /* topology */
+  const parts = [];
+  CHAIN.forEach((name, i) => {
+    const c = s.cfg[name];
+    parts.push(`<div class="svc ${name}${c.sdk ? "" : " dark"}${c.fail ? " failing" : ""}">
+      <div class="n">${name}</div>
+      <div class="f"><span>SDK <b class="${c.sdk ? "on" : "off"}">${c.sdk ? "on" : "off"}</b></span>
+      ${NEXT[name] ? `<span>forwards header <b class="${c.sdk && c.propagate ? "on" : "off"}">${!c.sdk ? "no (no SDK)" : c.propagate ? "yes" : "no"}</b></span>` : `<span>leaf</span>`}
+      <span>work <b>${c.work + c.internal + 6}ms</b></span>${c.fail ? `<span class="off">returns 500</span>` : ""}
+      ${i === 0 ? `<span>samples <b>${s.rate * 100}%</b></span>` : ""}</div></div>`);
+    if (NEXT[name]) {
+      const ok = c.sdk && c.propagate;
+      const hop = s.last?.hops.find(h => h.from === name);
+      parts.push(`<div class="hop${ok ? "" : " none"}"><div class="arrow">→</div><span class="chip">traceparent</span><div class="sub">${hop ? (hop.header ? `flags ${hop.header.sampled ? "01 sampled" : "00 not sampled"}` : "dropped") : ok ? "will be forwarded" : "will be dropped"}</div></div>`);
+    }
+  });
+  d3.select("#topo").html(parts.join(""));
+  d3.select("#cfgnote").text(s.last ? `last request #${s.last.seq}` : "no request yet");
+
+  /* waterfall */
+  const wf = d3.select("#wf");
+  if (!s.last) { wf.html(`<div class="none">Send a request. Each service with an SDK will record spans; the backend groups them by trace id.</div>`); d3.select("#wfnote").text(""); }
+  else {
+    const { spans, total } = s.last;
+    const traceIds = [...new Set(spans.map(x => x.traceId))];
+    const byId = new Map(spans.map(x => [x.id, x]));
+    const depth = x => { let d = 0, p = x.parentId; while (p && byId.has(p)) { d++; p = byId.get(p).parentId; } return d; };
+    const html = traceIds.map((tid, ti) => {
+      const ts = spans.filter(x => x.traceId === tid).sort((a, b) => a.start - b.start || depth(a) - depth(b));
+      const root = ts.find(x => !x.parentId || !byId.has(x.parentId));
+      const sampled = ts[0].sampled;
+      const orphan = root && root.orphanRoot;
+      const rows = ts.map(x => {
+        const d = depth(x), left = x.start / total * 100, w = Math.max(0.8, (x.end - x.start) / total * 100);
+        const missingParent = x.parentId && !byId.has(x.parentId);
+        return `<div class="span ${x.service}${x.status === "error" ? " error" : ""}" style="display:contents">
+          <div class="lbl" style="padding-left:${d * 14}px" title="${x.id}"><i></i>${x.name} <span class="k">${x.kind}${missingParent ? " · parent missing" : ""}</span></div>
+          <div class="track"><div class="bar" style="left:${left}%;width:${w}%">${x.end - x.start}ms</div></div></div>`;
+      }).join("");
+      /* an uninstrumented hop shows as a striped gap under the client span that called it */
+      const gaps = ts.filter(x => x.kind === "client").map(x => {
+        const callee = x.name.split(" ")[1];
+        if (s.cfg[callee].sdk) return "";
+        const left = x.start / total * 100, w = Math.max(0.8, (x.end - x.start) / total * 100);
+        return `<div class="span gap" style="display:contents"><div class="lbl" style="padding-left:${(depth(x) + 1) * 14}px">(${callee}: no SDK) <span class="k">${x.end - x.start}ms unexplained</span></div><div class="track"><div class="bar" style="left:${left}%;width:${w}%"></div></div></div>`;
+      }).join("");
+      return `<div class="trace${orphan ? " orphan" : ""}${sampled ? "" : " unsampled"}">
+        <div class="th"><span class="tid">trace ${short(tid)} <b>${orphan ? "· root has no parent — an orphan" : ti === 0 ? "· root: gateway" : ""}</b></span>
+        <span>${ts.length} span(s) · ${sampled ? "exported" : "sampled=0 · not exported"}${ts.some(x => x.status === "error") ? " · <span style='color:var(--bad)'>error</span>" : ""}</span></div>
+        <div class="rows">${rows}${gaps}<div class="axis"><span>0ms</span><span>${Math.round(total / 2)}ms</span><span>${total}ms</span></div></div></div>`;
+    }).join("");
+    wf.html(html);
+    d3.select("#wfnote").text(traceIds.length === 1 ? `1 trace · ${spans.length} spans · ${total}ms` : `${traceIds.length} traces from one request`);
+  }
+
+  /* headers + logs */
+  const hd = d3.select("#hdrs");
+  if (!s.last) hd.html(`<div class="legend">After a request, each hop's <code>traceparent</code> appears here.</div>`);
+  else hd.html(s.last.hops.map(h => `<div class="h${h.header ? "" : " none"}"><div class="t">${h.from} → ${h.to}</div><div class="v">${h.header
+      ? `<span class="ver">00</span>-<span class="tid">${h.header.traceId}</span>-<span class="sid">${h.header.spanId}</span>-<span class="fl${h.header.sampled ? "" : " off"}">${h.header.sampled ? "01" : "00"}</span>`
+      : `no traceparent — ${h.reason}`}</div></div>`).join("") +
+    `<div class="legend"><span class="ver">version</span> · <span style="color:var(--hdr)">trace id</span> · <span style="color:var(--ink)">parent span id</span> · <span style="color:var(--pay)">flags (01 = sampled)</span></div>`);
+  const lg = d3.select("#logs");
+  if (!s.last) lg.html("");
+  else lg.html(`<div class="cap2">log lines from this request</div>` + s.last.logs.map(l => `<div>[${l.service}] ${l.text} ${l.traceId ? `<span class="tid">trace_id=${short(l.traceId)}</span>` : `<span class="no">no trace_id</span>`}</div>`).join(""));
+}
+
+/* ============================================================================
+   4. LESSON
+   ========================================================================= */
+const cfg = (s, n) => s.cfg[n];
+const lastTraces = s => s.last ? new Set(s.last.spans.map(x => x.traceId)).size : 0;
+const allDefault = s => CHAIN.every(n => s.cfg[n].sdk && s.cfg[n].propagate && !s.cfg[n].fail) && s.rate === 1 && s.cfg.payments.internal === 40;
+
+const LESSON = [
+  { title: "Send one request",
+    body: `Gateway calls orders, orders calls payments. Every service has an SDK, so each one
+    records a <strong>server span</strong> for the request it received, an <strong>internal
+    span</strong> for its own work, and a <strong>client span</strong> for the call it made.
+    Seven spans, one trace, one waterfall. Read it top-down as a call stack across machines.`,
+    try: "request", expect: /^request/,
+    needs: s => allDefault(s) && !s.last },
+
+  { title: "The whole trick is one header",
+    body: `Nothing links those spans except a value each service put on its outgoing HTTP call.
+    The trace id is the same on both hops; the parent span id changes to whichever client span
+    made the call; the last byte says whether this trace is being sampled. That's the entire
+    protocol. Everything else is bookkeeping.`,
+    try: "headers", expect: /^headers/, readonly: true,
+    needs: s => !!s.last },
+
+  { title: "Break it in the middle",
+    body: `Tell orders to stop forwarding the header. Its SDK still records spans perfectly.
+    This is the common real-world case: a hand-rolled HTTP client, a message queue, a thread
+    pool, or a framework the auto-instrumentation doesn't know about.`,
+    try: "propagate off orders", expect: /^propagate off orders/,
+    needs: s => allDefault(s) && !!s.last },
+
+  { title: "Two traces from one request",
+    body: `Payments received no header, so its SDK did the only thing it can: start a new
+    trace with no parent. The backend now shows an orphan — a root span for <code>POST
+    /charge</code> that appears to come from nowhere — and a first trace whose client span
+    into payments has nothing beneath it. Neither trace explains the latency.`,
+    try: "request", expect: /^request/,
+    needs: s => !cfg(s, "orders").propagate && lastTraces(s) < 2 },
+
+  { title: "Repair the hop",
+    body: `Back to forwarding.`,
+    try: "propagate on orders", expect: /^propagate on orders/,
+    needs: s => !cfg(s, "orders").propagate },
+
+  { title: "A service with no SDK",
+    body: `Now take the SDK away from payments entirely. No spans, and — because there is no
+    code to read the incoming header and put it on outgoing calls — no propagation either.`,
+    try: "instrument off payments", expect: /^instrument off payments/,
+    needs: s => cfg(s, "payments").sdk && cfg(s, "orders").propagate },
+
+  { title: "The black box",
+    body: `One trace, but the waterfall ends at orders' client span. The striped gap is the
+    time payments took, visible only as the caller's wait. If payments called anything
+    downstream, that would start an orphan trace of its own. Uninstrumented services don't
+    just go dark; they cut the chain for everything behind them.`,
+    try: "request", expect: /^request/,
+    needs: s => !cfg(s, "payments").sdk && (!s.last || s.last.spans.some(x => x.service === "payments")) },
+
+  { title: "Give it back",
+    body: `SDK on.`,
+    try: "instrument on payments", expect: /^instrument on payments/,
+    needs: s => !cfg(s, "payments").sdk },
+
+  { title: "Where does the time go?",
+    body: `Make the card charge slow. Then look at how the slowness shows up at every level.`,
+    try: "slow payments 800", expect: /^slow payments/,
+    needs: s => cfg(s, "payments").sdk && cfg(s, "payments").internal === 40 },
+
+  { title: "Read the waterfall bottom-up",
+    body: `Every span on the path is long now, because each one is waiting on the one below.
+    The cause is the deepest long span with nothing long beneath it: <code>charge card</code>.
+    Everything above it is a symptom. Without the tree you'd see three slow services and
+    blame the wrong one.`,
+    try: "request", expect: /^request/,
+    needs: s => cfg(s, "payments").internal === 800 && (!s.last || s.last.total < 800) },
+
+  { title: "Speed it up again",
+    body: `Back to 40ms.`,
+    try: "slow payments 40", expect: /^slow payments 40/,
+    needs: s => cfg(s, "payments").internal !== 40 },
+
+  { title: "Errors are recorded once, reflected upward",
+    body: `Make payments fail.`,
+    try: "fail payments", expect: /^fail payments\s*$/,
+    needs: s => !cfg(s, "payments").fail && cfg(s, "payments").internal === 40 },
+
+  { title: "Find the deepest red",
+    body: `The 500 originates in one internal span. Its server span records error status, the
+    caller's client span records the HTTP 500 it got back, and so on up to the gateway. Each
+    span is telling the truth about what it saw. The deepest red span is where to look.`,
+    try: "request", expect: /^request/,
+    needs: s => cfg(s, "payments").fail && (!s.last || s.last.status === "ok") },
+
+  { title: "Fix it",
+    body: `Payments succeeds again.`,
+    try: "fix payments", expect: /^(fix payments|fail payments off)/,
+    needs: s => cfg(s, "payments").fail },
+
+  { title: "Sampling is decided at the root",
+    body: `You can't keep every trace. Set the gateway's sampler to zero. Spans will still be
+    created everywhere — but the flags byte in the header will say 00, and every SDK that
+    sees 00 will discard its spans instead of exporting them.`,
+    try: "sample 0", expect: /^sample 0\s*$/,
+    needs: s => s.rate === 1 && !cfg(s, "payments").fail },
+
+  { title: "Nothing arrives",
+    body: `The waterfall is faded: the backend shows nothing for this request. One decision,
+    made once, honoured three times. That is what "head-based sampling" means, and why it's
+    cheap: no service has to think.`,
+    try: "request", expect: /^request/,
+    needs: s => s.rate === 0 && (!s.last || s.last.spans.some(x => x.sampled)) },
+
+  { title: "…which means a broken hop also breaks sampling",
+    body: `Drop the header at orders again while sampling is zero.`,
+    try: "propagate off orders", expect: /^propagate off orders/,
+    needs: s => s.rate === 0 && cfg(s, "orders").propagate },
+
+  { title: "A trace nobody asked for",
+    body: `Payments never saw the 00 flag, so its SDK made its own decision as a new root and
+    exported an orphan. The backend now contains partial traces that cost money and explain
+    nothing. Whenever you see lonely leaf spans in production, look for the hop that dropped
+    the header.`,
+    try: "request", expect: /^request/,
+    needs: s => s.rate === 0 && !cfg(s, "orders").propagate && lastTraces(s) < 2 },
+
+  { title: "Restore both",
+    body: `Forwarding on, sampling back to 100%.`,
+    try: "propagate on orders", expect: /^propagate on orders/,
+    needs: s => !cfg(s, "orders").propagate },
+
+  { title: "…and the sampler",
+    body: `Everything exported again.`,
+    try: "sample 1", expect: /^sample 1\s*$/,
+    needs: s => s.rate !== 1 },
+
+  { title: "Logs join through the same id",
+    body: `Send a request, then look at the log lines. Each SDK stamped the current trace id
+    onto every log its service wrote. Log/trace correlation isn't a feature of the backend;
+    it's the same id showing up in two places. Take an SDK away and its logs go anonymous.`,
+    try: "request", expect: /^request/,
+    needs: s => allDefault(s) && (!s.last || s.last.spans.some(x => !x.sampled) || lastTraces(s) > 1) },
+
+  { title: "Look at the logs",
+    body: `Three lines, one trace id. Click through from a slow trace to exactly the log lines
+    written during it — that's the payoff.`,
+    try: "logs", expect: /^logs/, readonly: true,
+    needs: s => !!s.last },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try removing the gateway's SDK (who becomes the
+    root then?), a half-sampled world with <code>sample 0.5</code> and several requests, or
+    an error in orders with payments never called.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   5. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Traces sandbox loaded. Type 'help', or: request", "dim");
+</script>
+</body>
+</html>

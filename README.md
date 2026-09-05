@@ -15,8 +15,9 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 | 01 | Kubernetes | [k8s/reconciliation.html](k8s/reconciliation.html) | kubectl writes desired state; controllers run per tick and close the gap: self-healing, scaling, node loss, rolling update, undo, garbage collection |
 | 01 | Databases | [db/transactions.html](db/transactions.html) | Two interleaved transactions; dirty, non-repeatable and phantom reads, row locks, and a serialization failure, one isolation level at a time |
 | 01 | AI systems | [ai/agent-loop.html](ai/agent-loop.html) | The agent loop: the model as a stateless function over the whole context, tool calls and results as text, retries, runtime stop conditions, memory as a tool, compaction |
+| 01 | Observability | [otel/traces.html](otel/traces.html) | OpenTelemetry traces: spans linked by a traceparent header; dropped headers, uninstrumented services, latency attribution, error status, head-based sampling, log correlation |
 
-Planned: OpenTelemetry traces, transformer forward pass, post-training, diffusion models.
+Planned: transformer forward pass, post-training, diffusion models.
 
 ## Conventions
 
