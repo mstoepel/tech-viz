@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read, edit, verify — a coding agent sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Same roles as the agent loop page: model purple, tools amber, the user
+   cyan. Tests are the only green/red thing on the page, on purpose — they
+   are the only evidence. Files the agent has read are tinted by how much
+   of the budget they cost.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --model:#b08be8; --tool:#e8a33d; --user:#5cc8d6; --pass:#6fbf73; --fail:#e06c6c; --sub:#e07aa8;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--pass)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--model);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--model);color:var(--model)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--model);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the repo on the left with every file showing what the
+   agent did to it and what it cost; the agent's turns and context meter in
+   the middle; the tests on the right, the only thing that can say "done".
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.cap button{padding:2px 8px;font-size:11px;letter-spacing:0;text-transform:none}
+.cap button.hot{border-color:var(--tool);color:var(--tool)}
+.stage{display:grid;grid-template-columns:250px 1fr 250px;gap:12px;align-items:start}
+.tree{padding:8px 10px;font-family:var(--code);font-size:11px;display:flex;flex-direction:column;gap:3px}
+.f{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center;padding:4px 6px;border-radius:3px;border:1px solid transparent;cursor:pointer;color:var(--ink-dim)}
+.f:hover{border-color:var(--line)}
+.f .p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.f .p i{font-style:normal;color:var(--ink-faint)}
+.f .t{font-size:9.5px;color:var(--ink-faint);white-space:nowrap}
+.f.read{background:rgba(232,163,61,var(--a));color:var(--ink)}
+.f.edited .p::after{content:" ✎";color:var(--model)}
+.f.grepped .p::after{content:" ⌕";color:var(--tool)}
+.f.edited.grepped .p::after{content:" ⌕ ✎";color:var(--model)}
+.f.big .t{color:var(--fail)}
+.f.test .p{color:var(--user)}
+.f.sel{border-color:var(--ink-faint)}
+.src{padding:8px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);white-space:pre;overflow-x:auto;border-top:1px solid var(--line);line-height:1.5;max-height:230px;overflow-y:auto}
+.src .ln{color:var(--ink-faint);display:inline-block;width:2em}
+.src .del{color:var(--fail);background:rgba(224,108,108,.08)} .src .add{color:var(--pass);background:rgba(111,191,115,.08)}
+.src .hl{background:rgba(232,163,61,.12)}
+.meter{padding:8px 12px;border-bottom:1px solid var(--line)}
+.meter .bar{height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden}
+.meter .bar i{display:block;height:100%;background:var(--pass);transition:width .3s,background .3s}
+.meter.warn .bar i{background:var(--tool)} .meter.full .bar i{background:var(--fail)}
+.meter .lbl{font-family:var(--code);font-size:10px;color:var(--ink-faint);margin-top:4px;display:flex;justify-content:space-between}
+.meter.sub .bar i{background:var(--sub)}
+.turns{padding:8px 12px;display:flex;flex-direction:column;gap:5px;max-height:400px;overflow-y:auto}
+.turn{border:1px solid var(--line);border-left:3px solid var(--tool);border-radius:var(--r);padding:5px 8px;background:var(--bg);font-family:var(--code);font-size:10.5px;animation:pop .25s ease-out}
+.turn .h{display:flex;justify-content:space-between;gap:6px;color:var(--ink-faint);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+.turn .c{color:var(--tool);margin:1px 0} .turn .c b{font-weight:400;color:var(--ink)}
+.turn .r{color:var(--ink-dim);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.turn .why{color:var(--ink-faint);font-style:italic}
+.turn.text{border-left-color:var(--model)} .turn.text .c{color:var(--model)}
+.turn.fail .r{color:var(--fail)} .turn.pass .r{color:var(--pass)}
+.turn.runtime{border-left-color:var(--fail)} .turn.runtime .c{color:var(--fail)}
+.turn.sub{border-left-color:var(--sub);margin-left:14px} .turn.sub .c{color:var(--sub)}
+.turns .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+@keyframes pop{from{transform:translateY(4px);opacity:0}to{transform:none;opacity:1}}
+.tests{padding:10px 12px;font-family:var(--code);font-size:11px}
+.tests .big{font-family:var(--mono);font-size:20px;font-weight:700;line-height:1.1}
+.tests .big.pass{color:var(--pass)} .tests .big.fail{color:var(--fail)} .tests .big.unk{color:var(--ink-faint)}
+.tests .out{color:var(--ink-dim);white-space:pre-wrap;margin-top:6px;font-size:10.5px;line-height:1.45}
+.tests .out .e{color:var(--fail)}
+.verdict{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:8px 12px;border-top:1px solid var(--line)}
+.verdict.good{color:var(--pass)} .verdict.bad{color:var(--fail)} .verdict.warn{color:var(--tool)} .verdict.none{color:var(--ink-faint)}
+.metrics{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr;gap:5px 8px}
+.metrics .k{color:var(--ink-faint);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+.metrics .v{font-family:var(--mono);font-size:14px;font-weight:700;color:var(--ink)}
+.metrics .v.good{color:var(--pass)} .metrics .v.bad{color:var(--fail)}
+.strat{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);border-top:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.strat b{color:var(--ink-dim);font-weight:400} .strat b.on{color:var(--model)}
+.runs{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line);display:flex;flex-direction:column;gap:3px}
+.runs .r{display:grid;grid-template-columns:78px 1fr 46px;gap:6px;align-items:center}
+.runs .r .b{height:6px;background:var(--panel-2);border-radius:2px;overflow:hidden} .runs .r .b i{display:block;height:100%}
+.runs .r .t{text-align:right}
+.runs .none{color:var(--ink-faint)}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--model)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .m{color:var(--model)} .log .t{color:var(--tool)} .log .p{color:var(--pass)} .log .err{color:var(--fail)} .log .s{color:var(--sub)} .log .u{color:var(--user)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--model)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:900px){ .stage{grid-template-columns:1fr 1fr} .stage > .box:nth-child(2){grid-column:1 / -1;order:-1} }
+@media (max-width:560px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 05 · AI systems</p>
+  <h1>A coding agent is the loop plus three habits: read, edit, <em>verify</em></h1>
+  <p class="standfirst">Give an agent a repo and a failing test. Every good run has the same
+  shape: reproduce the failure, read only what the failure points at, make one edit, run the
+  tests again, and stop when they pass. Every bad run is one of those steps missing. Pick a
+  strategy, step the loop, and watch which files it reads, what it costs, and whether the
+  green bar was earned or claimed.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>The repo</span><span class="st" id="repost"></span></div>
+      <div class="tree" id="tree"></div>
+      <div class="src" id="src"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>The agent</span><span><button id="stepbtn">step</button> <button id="runbtn">run</button> <span class="st" id="agst"></span></span></div>
+      <div class="meter" id="meter"><div class="bar"><i></i></div><div class="lbl"><span id="ml"></span><span id="mr"></span></div></div>
+      <div class="meter sub" id="submeter" hidden><div class="bar"><i></i></div><div class="lbl"><span id="sml"></span><span>subagent's own context · parent never sees it</span></div></div>
+      <div class="turns" id="turns"></div>
+      <div class="strat" id="strat"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>The tests · the only evidence</span></div>
+      <div class="tests" id="tests"></div>
+      <div class="verdict none" id="verdict"></div>
+      <div class="metrics" id="metrics"></div>
+      <div class="runs" id="runs"></div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="task fix">
+    </div>
+  </div>
+  <p class="hintbar"><code>task fix</code> · <code>strategy careful|blind|greedy|noverify</code> · <code>step</code> · <code>run</code> ·
+  <code>subagent on</code> · <code>show src/cart.py</code> · <code>tests</code> · <code>limit tokens 1500</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the agent loop page. The repo is seven files
+    with real contents; the test harness actually computes the cart total from whatever the
+    edited file says, so a wrong edit produces a real wrong number. The "model" is a scripted
+    policy per strategy — careful, blind, greedy, no-verify — because the point is the loop
+    around it, not its judgement. Tool results cost what they'd cost: a file read costs the
+    file. The subagent runs its own loop in its own context and hands back a summary; the
+    parent pays only for the summary.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. THE REPO, THE HARNESS, THE STATE
+   ========================================================================= */
+const tok = t => Math.ceil((t || "").length / 4) + 4;
+const BASE_FILES = {
+  "README.md": "# shop\n\nA tiny cart. Run tests with `pytest`.\n\n- src/cart.py — the Cart class\n- src/pricing.py — tax and coupons\n- src/api.py — HTTP handlers\n",
+  "src/cart.py": [
+    "from pricing import TAX_RATE, apply_coupon",
+    "",
+    "class Cart:",
+    "    def __init__(self):",
+    "        self.items = []",
+    "        self.coupon = 0.0",
+    "",
+    "    def add(self, price, qty=1):",
+    "        self.items.append((price, qty))",
+    "",
+    "    def total(self):",
+    "        subtotal = sum(p * q for p, q in self.items)",
+    "        taxed = subtotal * (1 + TAX_RATE)",
+    "        return round(apply_coupon(taxed, self.coupon), 2)"
+  ].join("\n"),
+  "src/pricing.py": "TAX_RATE = 0.2\n\ndef apply_coupon(amount, off):\n    \"\"\"A coupon is a fixed amount off, never below zero.\"\"\"\n    return max(0.0, amount - off)\n",
+  "src/api.py": "from cart import Cart\n\ndef checkout(request):\n    cart = Cart()\n    for item in request.json[\"items\"]:\n        cart.add(item[\"price\"], item.get(\"qty\", 1))\n    cart.coupon = request.json.get(\"coupon\", 0)\n    return {\"total\": cart.total()}\n",
+  "src/utils.py": "def money(x):\n    return f\"${x:,.2f}\"\n\ndef parse_qty(s):\n    try:\n        return max(1, int(s))\n    except ValueError:\n        return 1\n",
+  "tests/test_cart.py": "from cart import Cart\n\ndef test_coupon_before_tax():\n    c = Cart()\n    c.add(100)\n    c.coupon = 10\n    # coupons come off the pre-tax amount: (100 - 10) * 1.2\n    assert c.total() == 108.0\n\ndef test_empty():\n    assert Cart().total() == 0.0\n",
+  "data/fixtures.json": "[\n" + Array.from({ length: 60 }, (_, i) => `  {"id": ${1000 + i}, "sku": "SKU-${String(i).padStart(4, "0")}", "name": "Fixture product number ${i} with a long descriptive name", "price": ${(9.99 + i * 3.5).toFixed(2)}, "tags": ["fixture", "test", "catalog", "group-${i % 7}"], "stock": ${(i * 37) % 200}}`).join(",\n") + "\n]\n"
+};
+const FIXED_CART = BASE_FILES["src/cart.py"].replace(
+  "        taxed = subtotal * (1 + TAX_RATE)\n        return round(apply_coupon(taxed, self.coupon), 2)",
+  "        discounted = apply_coupon(subtotal, self.coupon)\n        return round(discounted * (1 + TAX_RATE), 2)");
+
+/* the harness: read the numbers out of the files and compute what the test would see */
+function runTests(files) {
+  const cart = files["src/cart.py"], pricing = files["src/pricing.py"];
+  const rate = parseFloat((/TAX_RATE\s*=\s*([\d.]+)/.exec(pricing) || [0, "0.2"])[1]);
+  const couponFirst = /apply_coupon\(subtotal/.test(cart) && /\* \(1 \+ TAX_RATE\)/.test(cart);
+  const taxFirst = /subtotal \* \(1 \+ TAX_RATE\)/.test(cart) && /apply_coupon\(taxed/.test(cart);
+  const pct = /amount \* \(1 - off\)/.test(pricing);
+  const coupon = (a, off) => pct ? a * (1 - off) : Math.max(0, a - off);
+  let total;
+  if (couponFirst) total = +(coupon(100, 10) * (1 + rate)).toFixed(2);
+  else if (taxFirst) total = +coupon(100 * (1 + rate), 10).toFixed(2);
+  else return { pass: false, out: "E   NameError / SyntaxError in src/cart.py — total() no longer computes", failing: "test_coupon_before_tax", broken: true };
+  const empty = /sum\(p \* q for p, q in self\.items\)/.test(cart);
+  if (total === 108) return { pass: empty, out: empty ? "2 passed in 0.04s" : "1 passed, 1 failed\ntest_empty: assert Cart().total() == 0.0", failing: empty ? null : "test_empty" };
+  return { pass: false, out: `1 failed, 1 passed in 0.05s\n\ntests/test_cart.py::test_coupon_before_tax\n    assert c.total() == 108.0\nE   assert ${total} == 108.0`, failing: "test_coupon_before_tax", total };
+}
+
+const SYSTEM = "You are a coding agent. Tools: read_file(path), grep(pattern), list_files(), edit_file(path, old, new), run_tests(). Make the change requested, then confirm it with the tests.";
+function initialState() {
+  return { files: { ...BASE_FILES }, task: null, strategy: null, subagent: false,
+           ctx: [{ role: "system", text: SYSTEM }], turns: [], sub: null, status: "idle",
+           tokenLimit: 3000, turnLimit: 8, sent: 0, calls: 0, edits: [], lastTests: null, verifiedAfterEdit: false,
+           reads: {}, greps: [], sel: "src/cart.py", runs: [] };
+}
+const clone = s => structuredClone(s);
+const ctxTokens = s => s.ctx.reduce((a, m) => a + tok(m.text), 0);
+const turnsSince = s => s.turns.length;
+
+/* ============================================================================
+   2. TOOLS — plain functions over the repo
+   ========================================================================= */
+const TOOLS = {
+  list_files: (s) => Object.keys(s.files).map(p => `${p} (${tok(s.files[p])} tokens)`).join("\n"),
+  read_file: (s, { path }) => { if (!(path in s.files)) throw new Error(`no such file: ${path}`); s.reads[path] = (s.reads[path] || 0) + 1; return s.files[path]; },
+  grep: (s, { pattern }) => { const re = new RegExp(pattern, "i"); const hits = []; Object.entries(s.files).forEach(([p, c]) => c.split("\n").forEach((l, i) => { if (re.test(l)) hits.push(`${p}:${i + 1}: ${l.trim()}`); })); if (!s.greps.includes(pattern)) s.greps.push(pattern); return hits.length ? hits.join("\n") : "(no matches)"; },
+  edit_file: (s, { path, old, new: nu }) => { if (!(path in s.files)) throw new Error(`no such file: ${path}`); if (!s.files[path].includes(old)) throw new Error(`edit failed: the text to replace is not in ${path} (did you read it?)`); s.files[path] = s.files[path].replace(old, nu); s.edits.push({ path, old, new: nu }); s.verifiedAfterEdit = false; return `edited ${path}: -${old.split("\n").length} +${nu.split("\n").length} lines`; },
+  run_tests: (s) => { const r = runTests(s.files); s.lastTests = r; if (s.edits.length && r.pass) s.verifiedAfterEdit = true; return r.out; }
+};
+
+/* ============================================================================
+   3. THE "MODEL" — one scripted policy per strategy. Each returns the next
+   action given what's in the context. Deterministic on purpose.
+   ========================================================================= */
+const OLD = "        taxed = subtotal * (1 + TAX_RATE)\n        return round(apply_coupon(taxed, self.coupon), 2)";
+const NEW = "        discounted = apply_coupon(subtotal, self.coupon)\n        return round(discounted * (1 + TAX_RATE), 2)";
+const did = (s, name, arg) => s.turns.some(t => t.tool === name && (!arg || JSON.stringify(t.args).includes(arg)));
+const lastTool = (s, name) => [...s.turns].reverse().find(t => t.tool === name);
+
+const POLICIES = {
+  careful: s => {
+    if (!did(s, "run_tests")) return { tool: "run_tests", args: {}, why: "reproduce first: what exactly fails?" };
+    if (s.lastTests && s.lastTests.pass && s.edits.length) return { text: "Fixed: coupons are now applied to the subtotal before tax in Cart.total(). Both tests pass.", why: "tests green after my edit → done" };
+    if (!did(s, "read_file", "tests/test_cart.py")) return { tool: "read_file", args: { path: "tests/test_cart.py" }, why: "the failure names this test; read what it expects" };
+    if (!did(s, "grep")) return { tool: "grep", args: { pattern: "def total" }, why: "find where total() lives without reading everything" };
+    if (!did(s, "read_file", "src/cart.py")) return { tool: "read_file", args: { path: "src/cart.py" }, why: "read the one file the grep pointed at" };
+    if (!s.edits.length) return { tool: "edit_file", args: { path: "src/cart.py", old: OLD, new: NEW }, why: "tax is applied before the coupon; swap the order" };
+    return { tool: "run_tests", args: {}, why: "verify the edit" };
+  },
+  blind: s => {
+    const n = s.turns.filter(t => t.tool === "edit_file").length;
+    if (s.lastTests && s.lastTests.pass) return { text: "Done.", why: "tests pass" };
+    if (lastTool(s, "edit_file") && !lastTool(s, "run_tests")) return { tool: "run_tests", args: {}, why: "check" };
+    if (s.turns.length && s.turns[s.turns.length - 1].tool !== "run_tests" && n > 0) return { tool: "run_tests", args: {}, why: "check" };
+    const guesses = [
+      { path: "src/pricing.py", old: "TAX_RATE = 0.2", new: "TAX_RATE = 0.08", why: "the total is too high; the tax rate must be wrong" },
+      { path: "src/pricing.py", old: "return max(0.0, amount - off)", new: "return amount * (1 - off)", why: "maybe the coupon is meant to be a percentage" },
+      { path: "src/pricing.py", old: "TAX_RATE = 0.08", new: "TAX_RATE = 0.0", why: "still wrong; try no tax" },
+      { path: "src/cart.py", old: "return round(apply_coupon(taxed, self.coupon), 2)", new: "return round(apply_coupon(taxed, self.coupon), 0)", why: "rounding, perhaps" }
+    ];
+    const g = guesses[n % guesses.length];
+    return { tool: "edit_file", args: { path: g.path, old: g.old, new: g.new }, why: g.why + " (guessing — nothing has been read)" };
+  },
+  greedy: s => {
+    if (!did(s, "list_files")) return { tool: "list_files", args: {}, why: "get the lay of the land" };
+    const order = ["README.md", "src/api.py", "src/utils.py", "src/pricing.py", "data/fixtures.json", "src/cart.py", "tests/test_cart.py"];
+    const next = order.find(p => !did(s, "read_file", p));
+    if (next) return { tool: "read_file", args: { path: next }, why: "read everything before touching anything" };
+    if (!s.edits.length) return { tool: "edit_file", args: { path: "src/cart.py", old: OLD, new: NEW }, why: "now I understand the codebase" };
+    if (!(s.lastTests && s.lastTests.pass)) return { tool: "run_tests", args: {}, why: "verify" };
+    return { text: "Done.", why: "tests pass" };
+  },
+  noverify: s => {
+    if (!did(s, "read_file", "tests/test_cart.py")) return { tool: "read_file", args: { path: "tests/test_cart.py" }, why: "see what's expected" };
+    if (!did(s, "read_file", "src/cart.py")) return { tool: "read_file", args: { path: "src/cart.py" }, why: "read the implementation" };
+    if (!s.edits.length) return { tool: "edit_file", args: { path: "src/cart.py", old: "        taxed = subtotal * (1 + TAX_RATE)", new: "        taxed = subtotal * (1 + TAX_RATE) - self.coupon" }, why: "subtract the coupon earlier — that should do it" };
+    return { text: "Done — I've fixed the coupon handling in Cart.total() so the coupon is subtracted before the final amount is computed.", why: "the edit looks right; finishing" };
+  }
+};
+/* the subagent's own policy: locate, summarise, return */
+const SUB_POLICY = s => {
+  if (!did(s, "grep")) return { tool: "grep", args: { pattern: "TAX_RATE|apply_coupon" }, why: "locate every use of tax and coupon" };
+  if (!did(s, "read_file", "src/cart.py")) return { tool: "read_file", args: { path: "src/cart.py" }, why: "read the file that applies both" };
+  if (!did(s, "read_file", "src/pricing.py")) return { tool: "read_file", args: { path: "src/pricing.py" }, why: "confirm what apply_coupon does" };
+  return { text: "In src/cart.py, Cart.total() computes taxed = subtotal * (1 + TAX_RATE) and then apply_coupon(taxed, self.coupon). apply_coupon subtracts a fixed amount. The test expects the coupon off the subtotal first: replace those two lines with discounted = apply_coupon(subtotal, self.coupon); return round(discounted * (1 + TAX_RATE), 2).", why: "found it; report back" };
+};
+/* the careful policy with a subagent available: delegate the search */
+const CAREFUL_SUB = s => {
+  if (!did(s, "run_tests")) return { tool: "run_tests", args: {}, why: "reproduce first" };
+  if (s.lastTests && s.lastTests.pass && s.edits.length) return { text: "Fixed: coupon now applied before tax in Cart.total(). Tests pass.", why: "verified → done" };
+  if (!did(s, "delegate")) return { tool: "delegate", args: { task: "Find where tax and the coupon are applied to the cart total and tell me the exact lines to change so the coupon comes off before tax." }, why: "searching the repo would fill my context; hand it to a subagent" };
+  if (!s.edits.length) return { tool: "edit_file", args: { path: "src/cart.py", old: OLD, new: NEW }, why: "apply the change the subagent described" };
+  return { tool: "run_tests", args: {}, why: "verify" };
+};
+
+/* ============================================================================
+   4. THE LOOP — one iteration of the parent agent
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const push = (n, m) => n.ctx.push(m);
+
+function iterate(n) {
+  const out = [];
+  if (n.status !== "ready") return { out: [line(n.status === "idle" ? "no task — try: task fix" : n.status === "done" ? "the agent has finished — task fix to reset, or change strategy and run again" : "stopped by the runtime — task fix to reset", "dim")], noop: true };
+  if (!n.strategy) return { out: [line("pick a strategy first: strategy careful|blind|greedy|noverify", "dim")], noop: true };
+  const used = ctxTokens(n);
+  const stop = (why, msg) => { n.status = "stopped"; n.turns.push({ runtime: true, text: why }); const r = runTests(n.files);
+    n.runs.push({ strategy: n.strategy + (n.subagent && n.strategy === "careful" ? "+sub" : ""), sent: n.sent, calls: n.calls, pass: r.pass, verified: n.verifiedAfterEdit, outcome: "stopped by runtime" });
+    return { out: [line(msg, "err")] }; };
+  if (used > n.tokenLimit) return stop(`context ${used}/${n.tokenLimit} tokens — the model was not called`, `runtime: context window full (${used}/${n.tokenLimit}). ${n.edits.length ? "The edit is in but unverified." : "Nothing was edited."}`);
+  if (turnsSince(n) >= n.turnLimit) return stop(`turn limit ${n.turnLimit} reached — the model was not called`, `runtime: turn limit reached (${n.turnLimit}). Loop stopped.`);
+  const policy = n.subagent && n.strategy === "careful" ? CAREFUL_SUB : POLICIES[n.strategy];
+  n.calls++; n.sent += used;
+  const a = policy(n);
+  out.push(line(`call #${n.calls} → model reads ${used} tokens`, "dim"));
+  if (a.text) { push(n, { role: "assistant", text: a.text }); n.turns.push({ text: a.text, why: a.why }); n.status = "done"; out.push(line(`model: ${a.text}`, "m"), line(`   (${a.why})`, "dim"));
+    const r = runTests(n.files); const honest = r.pass && n.verifiedAfterEdit;
+    n.runs.push({ strategy: n.strategy + (n.subagent && n.strategy === "careful" ? "+sub" : ""), sent: n.sent, calls: n.calls, pass: r.pass, verified: n.verifiedAfterEdit, outcome: honest ? "fixed & verified" : r.pass ? "fixed, unverified" : "claimed done, tests fail" });
+    return { out }; }
+  push(n, { role: "call", text: `${a.tool}(${JSON.stringify(a.args)})` });
+  out.push(line(`model: ${a.tool}(${a.tool === "edit_file" ? a.args.path : JSON.stringify(a.args)})`, "t"), line(`   (${a.why})`, "dim"));
+  let result, cls = "";
+  if (a.tool === "delegate") {
+    const sub = runSubagent(n, a.args.task); result = sub.summary; cls = "sub";
+    out.push(line(`subagent: ${sub.turns.length} turn(s), ${sub.tokens} tokens in its own context → ${tok(result)}-token summary back to the parent`, "s"));
+  } else {
+    try { result = TOOLS[a.tool](n, a.args); } catch (e) { result = "error: " + e.message; cls = "fail"; }
+    if (a.tool === "run_tests") cls = n.lastTests.pass ? "pass" : "fail";
+  }
+  push(n, { role: "tool", text: result });
+  n.turns.push({ tool: a.tool, args: a.args, result, why: a.why, cls, cost: tok(result) });
+  const preview = result.length > 100 ? result.slice(0, 98) + "…" : result;
+  out.push(line(`tool: ${preview.replace(/\n/g, " ⏎ ")}`, cls === "fail" ? "err" : cls === "pass" ? "p" : "t"), line(`   ${tok(result)} tokens into the context`, "dim"));
+  return { out };
+}
+function runSubagent(n, task) {
+  const sub = { files: n.files, ctx: [{ role: "system", text: "You are a research subagent. Answer the question with a short, precise summary." }, { role: "user", text: task }], turns: [], reads: n.reads, greps: n.greps, edits: [], lastTests: null };
+  let summary = "", guard = 0;
+  while (guard++ < 8) {
+    const a = SUB_POLICY(sub);
+    if (a.text) { summary = a.text; sub.turns.push({ text: a.text, why: a.why }); break; }
+    let result; try { result = TOOLS[a.tool](sub, a.args); } catch (e) { result = "error: " + e.message; }
+    sub.ctx.push({ role: "call", text: `${a.tool}(${JSON.stringify(a.args)})` }, { role: "tool", text: result });
+    sub.turns.push({ tool: a.tool, args: a.args, result, why: a.why, cost: tok(result) });
+  }
+  n.sub = { task, turns: sub.turns, tokens: ctxTokens(sub), summary };
+  return n.sub;
+}
+
+/* ============================================================================
+   5. COMMANDS
+   ========================================================================= */
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+function resetRun(n) { n.files = { ...BASE_FILES }; n.ctx = [{ role: "system", text: SYSTEM }]; n.turns = []; n.sub = null; n.sent = 0; n.calls = 0; n.edits = []; n.lastTests = null; n.verifiedAfterEdit = false; n.reads = {}; n.greps = []; }
+
+const REGISTRY = {
+  "task": (s, args) => { if (args[0] !== "fix") return fail("task fix   (the one task this sandbox knows: make the failing test pass)"); const n = clone(s); resetRun(n);
+    n.task = "The test suite is failing. Make it pass without changing the tests."; push(n, { role: "user", text: n.task }); n.status = "ready";
+    return { state: n, out: [line(`user: ${n.task}`, "u"), line("repo restored, context reset. The tests are red. Pick a strategy and step.", "dim")] }; },
+  "strategy": (s, args) => { if (!POLICIES[args[0]]) return fail("strategy careful | blind | greedy | noverify"); const n = clone(s); n.strategy = args[0];
+    if (n.task) { resetRun(n); push(n, { role: "user", text: n.task }); n.status = "ready"; }
+    const d = { careful: "reproduce, read what the failure points at, one edit, verify, stop", blind: "edit first, read never", greedy: "read every file before touching anything", noverify: "read, edit, declare victory" };
+    return { state: n, out: [line(`strategy ${args[0]}: ${d[args[0]]}`, "m"), line(n.task ? "repo and context reset for a fresh run" : "now: task fix", "dim")] }; },
+  "subagent": (s, args) => { if (!/^(on|off)$/.test(args[0] || "")) return fail("subagent on|off"); const n = clone(s); n.subagent = args[0] === "on"; if (n.task) { resetRun(n); push(n, { role: "user", text: n.task }); n.status = "ready"; }
+    return { state: n, out: [line(n.subagent ? "subagent available: the careful strategy will delegate the search and pay only for the summary" : "subagent off", "s")] }; },
+  "step": s => { const n = clone(s); const r = iterate(n); return r.noop ? { out: r.out } : { state: n, out: r.out }; },
+  "run": s => { const n = clone(s); if (n.status !== "ready") return { out: [line("nothing to run — task fix, then strategy", "dim")] }; const out = []; let g = 0;
+    while (n.status === "ready" && g++ < 20) { const r = iterate(n); out.push(...r.out); if (r.noop) break; }
+    const r = runTests(n.files);
+    out.push(line(`loop exited: ${n.status} · ${n.calls} call(s) · ${n.sent} tokens sent · tests ${r.pass ? "PASS" : "FAIL"}${n.status === "done" && !n.verifiedAfterEdit ? " · the agent never verified its edit" : ""}`, r.pass && n.verifiedAfterEdit ? "p" : "err"));
+    return { state: n, out }; },
+  "show": (s, args) => { const p = args[0]; if (!s.files[p]) return fail(`no such file (try: ${Object.keys(s.files).join(", ")})`); const n = clone(s); n.sel = p; return { state: n, out: [line(`${p} · ${tok(s.files[p])} tokens`, "dim")] }; },
+  "tests": s => { const r = runTests(s.files); return { out: r.out.split("\n").map(l => line(l, r.pass ? "p" : "err")).concat([line("(you ran these; the agent doesn't know)", "dim")]) }; },
+  "diff": s => ({ out: s.edits.length ? s.edits.flatMap(e => [line(`--- ${e.path}`, "dim"), ...e.old.split("\n").map(l => line("- " + l, "err")), ...e.new.split("\n").map(l => line("+ " + l, "p"))]) : [line("no edits yet", "dim")] }),
+  "limit": (s, args) => { const [k, v] = args; if (!/^(tokens|turns)$/.test(k || "") || !(+v > 0)) return fail("limit tokens N | limit turns N"); const n = clone(s); if (k === "tokens") n.tokenLimit = +v; else n.turnLimit = +v; return { state: n, out: [line(`${k} limit ${v}`, "dim")] }; },
+  "help": () => ({ out: [
+    line("task fix                          set the task; restore the repo", "u"),
+    line("strategy careful|blind|greedy|noverify", "m"),
+    line("step · run                        one iteration / until the loop exits", "t"),
+    line("subagent on|off                   let careful delegate the search", "s"),
+    line("show <path> · diff · tests        look for yourself", "ok"),
+    line("limit tokens N · limit turns N    the runtime's stop conditions", "ok"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase(); if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   6. RENDERER
+   ========================================================================= */
+const esc = t => t.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+function render(s) {
+  /* repo */
+  const paths = Object.keys(s.files); const maxT = Math.max(...paths.map(p => tok(s.files[p])));
+  d3.select("#tree").html(paths.map(p => { const t = tok(s.files[p]); const r = s.reads[p] || 0; const ed = s.edits.some(e => e.path === p); const gr = s.greps.some(g => new RegExp(g, "i").test(s.files[p]));
+    return `<div class="f${r ? " read" : ""}${ed ? " edited" : ""}${gr && !ed ? " grepped" : ""}${t > 1500 ? " big" : ""}${p.startsWith("tests") ? " test" : ""}${p === s.sel ? " sel" : ""}" style="--a:${(0.08 + 0.4 * Math.min(1, t / maxT)).toFixed(2)}" data-p="${p}"><span class="p">${p.includes("/") ? `<i>${p.split("/")[0]}/</i>${p.split("/")[1]}` : p}</span><span class="t">${t}t${r ? ` · read×${r}` : ""}</span></div>`; }).join(""));
+  d3.selectAll("#tree .f").on("click", function () { run(`show ${this.dataset.p}`); });
+  const readT = Object.entries(s.reads).reduce((a, [p, c]) => a + tok(s.files[p]) * c, 0);
+  d3.select("#repost").text(`${Object.keys(s.reads).length}/${paths.length} files read · ${readT} tokens`);
+  const src = s.files[s.sel] || ""; const base = BASE_FILES[s.sel] || ""; const edit = s.edits.find(e => e.path === s.sel);
+  d3.select("#src").html(`<span class="ln" style="width:auto;color:var(--ink-dim)">${s.sel}</span>\n` + src.split("\n").map((l, i) => { const cls = edit && edit.new.split("\n").includes(l) && !base.split("\n").includes(l) ? "add" : (s.sel === "src/cart.py" && !edit && (i === 12 || i === 13) ? "hl" : ""); return `<span class="ln">${i + 1}</span><span class="${cls}">${esc(l)}</span>`; }).join("\n") + (edit ? "\n\n" + edit.old.split("\n").map(l => `<span class="del">- ${esc(l)}</span>`).join("\n") : ""));
+
+  /* agent */
+  const used = ctxTokens(s), pct = Math.min(100, used / s.tokenLimit * 100);
+  d3.select("#meter").attr("class", "meter" + (used > s.tokenLimit ? " full" : pct > 70 ? " warn" : "")); d3.select("#meter .bar i").style("width", pct + "%");
+  d3.select("#ml").text(`context ${used} / ${s.tokenLimit} tokens`); d3.select("#mr").text(`${s.calls} call(s) · ${s.sent} tokens sent`);
+  const sm = document.getElementById("submeter"); sm.hidden = !s.sub; if (s.sub) { d3.select("#submeter .bar i").style("width", Math.min(100, s.sub.tokens / s.tokenLimit * 100) + "%"); d3.select("#sml").text(`subagent context ${s.sub.tokens} tokens`); }
+  d3.select("#agst").text({ idle: "idle", ready: "ready", done: "exited", stopped: "stopped" }[s.status]);
+  d3.select("#stepbtn").classed("hot", s.status === "ready" && s.strategy); d3.select("#runbtn").classed("hot", s.status === "ready" && s.strategy);
+  const turnHtml = (t, i, sub) => t.runtime ? `<div class="turn runtime"><div class="h"><span>runtime</span></div><div class="c">${esc(t.text)}</div></div>`
+    : t.text ? `<div class="turn text${sub ? " sub" : ""}"><div class="h"><span>${sub ? "subagent" : "model"} · final</span></div><div class="c">${esc(t.text)}</div><div class="why">${esc(t.why)}</div></div>`
+    : `<div class="turn ${t.cls || ""}${sub ? " sub" : ""}"><div class="h"><span>turn ${i + 1}</span><span>${t.cost} tok</span></div><div class="c">${t.tool}(<b>${esc(t.tool === "edit_file" ? t.args.path : t.tool === "delegate" ? "…" : JSON.stringify(t.args))}</b>)</div><div class="r">${esc(t.result)}</div><div class="why">${esc(t.why)}</div></div>`;
+  const turns = s.turns.flatMap((t, i) => t.tool === "delegate" && s.sub ? [turnHtml(t, i), ...s.sub.turns.map((u, j) => turnHtml(u, j, true))] : [turnHtml(t, i)]);
+  d3.select("#turns").html(turns.length ? turns.join("") : `<div class="none">${s.task ? "pick a strategy, then step" : "no task yet — task fix"}</div>`);
+  const el = document.getElementById("turns"); el.scrollTop = el.scrollHeight;
+  d3.select("#strat").html(`<div>strategy: <b class="${s.strategy ? "on" : ""}">${s.strategy || "none"}</b> · subagent <b class="${s.subagent ? "on" : ""}">${s.subagent ? "on" : "off"}</b></div><div>limits: <b>${s.turnLimit}</b> calls · <b>${s.tokenLimit}</b> tokens</div>`);
+
+  /* tests */
+  const r = runTests(s.files); const known = s.lastTests;
+  d3.select("#tests").html(`<div class="big ${r.pass ? "pass" : "fail"}">${r.pass ? "PASS" : "FAIL"}</div><div style="color:var(--ink-faint);font-size:10px">${r.pass ? "2 tests" : r.failing}${known ? "" : " · the agent hasn't run them"}</div><div class="out">${esc(r.out).replace(/E {3}[^\n]*/g, m => `<span class="e">${m}</span>`)}</div>`);
+  const v = d3.select("#verdict");
+  if (s.status === "done") { const honest = r.pass && s.verifiedAfterEdit; v.attr("class", "verdict " + (honest ? "good" : r.pass ? "warn" : "bad")).text(honest ? "fixed and verified" : r.pass ? "fixed, but never verified" : "claimed done · tests still fail"); }
+  else if (s.status === "stopped") v.attr("class", "verdict bad").text(r.pass ? "stopped, but the fix is in" : "stopped without a fix");
+  else v.attr("class", "verdict none").text(s.task ? "in progress" : "");
+  const filesRead = Object.keys(s.reads).length;
+  d3.select("#metrics").html(`<div><div class="k">calls</div><div class="v">${s.calls}</div></div><div><div class="k">tokens sent</div><div class="v">${s.sent.toLocaleString()}</div></div><div><div class="k">files read</div><div class="v ${filesRead > 3 ? "bad" : ""}">${filesRead}/${paths.length}</div></div><div><div class="k">verified edit</div><div class="v ${s.edits.length ? (s.verifiedAfterEdit ? "good" : "bad") : ""}">${s.edits.length ? (s.verifiedAfterEdit ? "yes" : "no") : "—"}</div></div>`);
+  const maxS = Math.max(1, ...s.runs.map(x => x.sent));
+  d3.select("#runs").html(s.runs.length ? s.runs.map(x => `<div class="r"><span>${x.strategy}</span><div class="b"><i style="width:${x.sent / maxS * 100}%;background:${x.pass && x.verified ? "var(--pass)" : x.pass ? "var(--tool)" : "var(--fail)"}"></i></div><span class="t">${x.sent}</span></div>`).join("") + `<div style="color:var(--ink-faint);font-size:9.5px">bars: tokens sent · green verified, amber unverified, red failed</div>` : `<div class="none">finished runs line up here</div>`);
+}
+
+/* ============================================================================
+   7. LESSON
+   ========================================================================= */
+const T = s => s.turns.length;
+const strat = (s, n) => s.strategy === n;
+const LESSON = [
+  { title: "A repo and a red bar",
+    body: `Seven files. One test fails: a coupon is being applied after tax instead of before.
+    The agent doesn't know any of that yet — its context holds a system prompt and one sentence
+    from you. Look at the sizes on the left: fixtures.json alone is bigger than the whole
+    context budget.`,
+    try: "task fix", expect: /^task fix$/,
+    needs: s => !s.task },
+
+  { title: "Strategy: careful",
+    body: `The disciplined loop. It's the same loop as the agent-loop page; what makes it a
+    <em>coding</em> agent is the order it does things in.`,
+    try: "strategy careful", expect: /^strategy careful$/,
+    needs: s => s.task && !strat(s, "careful") },
+
+  { title: "1 · Reproduce",
+    body: `First call: run the tests, before reading a single line. The failure names the test,
+    the file, the line, and the wrong number. That output is the cheapest, most precise map of
+    the codebase the agent will ever get.`,
+    try: "step", expect: /^step$/,
+    needs: s => strat(s, "careful") && !s.subagent && T(s) === 0 && s.status === "ready" },
+
+  { title: "2 · Read what the failure points at",
+    body: `The test file, and nothing else. It says what "correct" means: coupon first, then tax.`,
+    try: "step", expect: /^step$/,
+    needs: s => strat(s, "careful") && T(s) === 1 },
+
+  { title: "3 · Locate, don't browse",
+    body: `A grep for the function costs 30 tokens and returns one line. Reading every file to
+    find it would cost thousands.`,
+    try: "step", expect: /^step$/,
+    needs: s => strat(s, "careful") && T(s) === 2 },
+
+  { title: "4 · Read the one file",
+    body: `cart.py, 160 tokens. The agent has now read 2 of 7 files and its context is a
+    fraction full. Everything it needs is in front of it.`,
+    try: "step", expect: /^step$/,
+    needs: s => strat(s, "careful") && T(s) === 3 },
+
+  { title: "5 · One edit",
+    body: `The edit tool takes the exact old text and the new text. It fails if the old text
+    isn't there — which is only possible if the agent actually read the file. Watch the diff
+    appear in the source panel.`,
+    try: "step", expect: /^step$/,
+    needs: s => strat(s, "careful") && T(s) === 4 },
+
+  { title: "6 · Verify",
+    body: `Run the tests again. Green. This is the only line in the whole run that is evidence
+    rather than intention.`,
+    try: "step", expect: /^step$/,
+    needs: s => strat(s, "careful") && T(s) === 5 },
+
+  { title: "7 · Stop",
+    body: `Plain text, so the loop exits. Seven calls, under two thousand tokens sent, two of
+    seven files read, verified. That's the shape to compare everything else against.`,
+    try: "step", expect: /^step$/,
+    needs: s => strat(s, "careful") && T(s) === 6 },
+
+  { title: "Strategy: blind",
+    body: `Now an agent that edits before reading. It has the task text and a hunch.`,
+    try: "strategy blind", expect: /^strategy blind$/,
+    needs: s => s.task && !strat(s, "blind") },
+
+  { title: "…run",
+    body: `Guess, test, guess, test. Every guess is plausible — the tax rate, the coupon
+    semantics — and every one is wrong, because it never read the failing test that says
+    exactly what's expected. The runtime's turn limit is what ends it. Look at the diff: it
+    has damaged pricing.py several different ways and never touched the bug.`,
+    try: "run", expect: /^run$/,
+    needs: s => strat(s, "blind") && s.status === "ready" && T(s) === 0 },
+
+  { title: "Strategy: greedy",
+    body: `The opposite failure: an agent that wants to understand everything first.`,
+    try: "strategy greedy", expect: /^strategy greedy$/,
+    needs: s => s.task && !strat(s, "greedy") },
+
+  { title: "…run",
+    body: `It lists the files and reads them in order. fixtures.json costs 2,000-odd tokens for
+    nothing. The context fills before it reaches cart.py, and the runtime refuses the next call.
+    No edit was ever made. Reading is not free, and reading everything is a way of doing nothing.`,
+    try: "run", expect: /^run$/,
+    needs: s => strat(s, "greedy") && s.status === "ready" && T(s) === 0 },
+
+  { title: "Strategy: no-verify",
+    body: `The subtle one. It reads the right files and makes a plausible edit. Then it says
+    "Done".`,
+    try: "strategy noverify", expect: /^strategy noverify$/,
+    needs: s => s.task && !strat(s, "noverify") },
+
+  { title: "…run",
+    body: `The loop exits cleanly with a confident summary. The bar on the right is still red.
+    The agent's message is not evidence; the tests are. A runtime that lets an agent finish
+    without a passing test run after its last edit will ship this.`,
+    try: "run", expect: /^run$/,
+    needs: s => strat(s, "noverify") && s.status === "ready" && T(s) === 0 },
+
+  { title: "Check for yourself",
+    body: `Run the tests from outside the loop.`,
+    try: "tests", expect: /^tests$/, readonly: true,
+    needs: s => strat(s, "noverify") && s.status === "done" },
+
+  { title: "Delegation",
+    body: `Back to careful, with a subagent available. The parent will hand off the search
+    ("find where tax and coupon are applied") to a second agent with its own, separate context.`,
+    try: "subagent on", expect: /^subagent on$/,
+    needs: s => !s.subagent },
+
+  { title: "…careful again",
+    body: `Same task, same discipline.`,
+    try: "strategy careful", expect: /^strategy careful$/,
+    needs: s => s.subagent && !strat(s, "careful") },
+
+  { title: "…run",
+    body: `The subagent greps and reads two files in a context the parent never sees, then
+    returns an 80-token summary. The parent pays for the summary, not the search. Compare the
+    tokens-sent bars: same fix, same verification, a fraction of the cost. That's the whole
+    case for subagents — and the whole risk, because the parent only knows what the summary
+    says.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.subagent && strat(s, "careful") && s.status === "ready" && T(s) === 0 },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>limit tokens 1200</code> with the careful
+    strategy (does it still fit?), <code>limit turns 3</code> to see it stopped mid-loop with
+    the edit made but unverified, or <code>show src/pricing.py</code> after a blind run.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   8. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("stepbtn").onclick = () => run("step");
+document.getElementById("runbtn").onclick = () => run("run");
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Coding agent sandbox loaded. Type 'help', or: task fix", "dim");
+</script>
+</body>
+</html>
