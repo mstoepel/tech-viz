@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Near is not the same as useful — a retrieval sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Each document gets a hue so clusters are legible on the map. The query is
+   amber; retrieved chunks are ringed; the chunk that actually holds the
+   answer is green. Red is a miss.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --q:#e8a33d; --hit:#6fbf73; --miss:#e06c6c; --sel:#b08be8;
+  --d0:#5cc8d6; --d1:#b08be8; --d2:#e07aa8; --d3:#c9b458; --d4:#7fa0e8; --d5:#6fbf73;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--q)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--sel);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--sel);color:var(--sel)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the chunks laid out by similarity, the query dropped onto
+   the same map, lines to whatever came back — and beside it the context that
+   actually got pasted in, which is the thing the model will read.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.stage{display:grid;grid-template-columns:1fr 320px;gap:12px;align-items:start}
+.knobs{display:flex;gap:5px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line);font-family:var(--code);font-size:10.5px;color:var(--ink-faint);align-items:center}
+.knobs .k{padding:2px 8px;font-size:10.5px}
+.knobs .k.on{border-color:var(--sel);color:var(--sel);background:rgba(176,139,232,.1)}
+.knobs .l{margin-left:6px;margin-right:2px}
+#map{display:block;width:100%}
+#map text{font-family:var(--code)}
+#map .dot{cursor:pointer}
+#map .dot circle{stroke-width:1.2}
+#map .dot.ret circle{stroke-width:2.4}
+#map .dot.ans circle{stroke:var(--hit)!important}
+#map .dot.sel circle{stroke:var(--ink)!important}
+#map .ray{stroke:var(--q);stroke-width:1;opacity:.5}
+#map .ray.top{stroke-width:1.8;opacity:.9}
+#map .qx{stroke:var(--q);stroke-width:2}
+#map .lbl{font-size:8.5px;fill:var(--ink-faint)}
+#map .rank{font-size:8.5px;font-weight:700;fill:var(--q)}
+.maplg{display:flex;gap:10px;flex-wrap:wrap;padding:6px 12px 8px;font-family:var(--code);font-size:10px;color:var(--ink-faint);border-top:1px solid var(--line)}
+.maplg i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.peek{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line);line-height:1.5;min-height:44px}
+.peek b{color:var(--ink);font-weight:400} .peek .m{color:var(--ink-faint)}
+
+.qbox{padding:8px 12px;font-family:var(--code);font-size:11.5px;color:var(--q);border-bottom:1px solid var(--line)}
+.qbox .none{color:var(--ink-faint)}
+.ctx{padding:8px 12px;display:flex;flex-direction:column;gap:5px}
+.ck{border:1px solid var(--line);border-left-width:3px;border-radius:var(--r);padding:5px 8px;background:var(--bg);font-family:var(--code);font-size:10.5px;color:var(--ink-dim);line-height:1.45}
+.ck .h{display:flex;justify-content:space-between;gap:6px;color:var(--ink-faint);font-size:9.5px;margin-bottom:2px}
+.ck .h b{font-weight:400}
+.ck.ans{border-left-color:var(--hit)} .ck.ans .h b{color:var(--hit)}
+.ck.part{border-left-color:var(--q)} .ck.part .h b{color:var(--q)}
+.ck.cutoff{opacity:.35;border-style:dashed}
+.ck em{font-style:normal;color:var(--ink);background:rgba(111,191,115,.12)}
+.ctx .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.budget{padding:4px 12px 8px}
+.budget .bar{height:8px;background:var(--panel-2);border-radius:2px;display:flex;overflow:hidden;position:relative}
+.budget .bar i{height:100%;display:block}
+.budget .bar .lim{position:absolute;top:-2px;width:2px;height:12px;background:var(--miss)}
+.budget .lbl{font-family:var(--code);font-size:9.5px;color:var(--ink-faint);margin-top:3px;display:flex;justify-content:space-between}
+.verdict{padding:8px 12px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;letter-spacing:.04em}
+.verdict.good{color:var(--hit)} .verdict.bad{color:var(--miss)} .verdict.none{color:var(--ink-faint)}
+.verdict .why{font-family:var(--code);font-size:10px;letter-spacing:0;color:var(--ink-faint);margin-top:3px;line-height:1.5}
+.bench{padding:8px 12px;font-family:var(--code);font-size:10.5px}
+.bench table{border-collapse:collapse;width:100%}
+.bench th{font-weight:400;color:var(--ink-faint);font-size:9.5px;text-align:left;letter-spacing:.06em;text-transform:uppercase;padding:3px 4px;border-bottom:1px solid var(--line)}
+.bench td{padding:3px 4px;border-bottom:1px solid rgba(46,58,71,.5);color:var(--ink-dim)}
+.bench td.ok{color:var(--hit)} .bench td.bad{color:var(--miss)} .bench td.n{text-align:right}
+.bench .tot{font-family:var(--mono);font-size:13px;font-weight:700;display:flex;justify-content:space-between;padding:6px 0 2px}
+.bench .tot .a.good{color:var(--hit)} .bench .tot .a.bad{color:var(--miss)}
+.bench .none{color:var(--ink-faint)}
+.curve{padding:8px 12px 4px}
+.curve svg{display:block;width:100%;height:150px}
+.curve text{font-family:var(--code);font-size:9px;fill:var(--ink-faint)}
+.curve .ax{stroke:var(--line)}
+.curve path{fill:none;stroke-width:1.8}
+.curve .k3{stroke:var(--hit)} .curve .k8{stroke:var(--sel)} .curve .tk{stroke:var(--q);stroke-dasharray:3 3;stroke-width:1.2}
+.curve .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.cnote{font-family:var(--code);font-size:10px;color:var(--ink-faint);padding:0 12px 10px;line-height:1.5}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--sel)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .q{color:var(--q)} .log .g{color:var(--hit)} .log .err{color:var(--miss)} .log .m{color:var(--sel)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--sel)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:820px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 08 · AI systems</p>
+  <h1>Retrieval finds what's <em>near</em>. That isn't the same as useful</h1>
+  <p class="standfirst">Retrieval-augmented generation is a search problem with a token budget
+  bolted on. Documents are cut into chunks, each becomes a vector, a question becomes a vector,
+  and the nearest few get pasted into the prompt. Every knob trades one failure for another:
+  chunks too small split the answer, too big bury it, k too small misses, too large drowns it.
+  Ask a question and watch what actually reaches the model.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>The corpus, laid out by similarity</span><span class="st" id="mapst"></span></div>
+      <div class="knobs" id="knobs"></div>
+      <svg id="map" viewBox="0 0 620 330"></svg>
+      <div class="maplg" id="maplg"></div>
+      <div class="peek" id="peek"></div>
+    </div>
+    <div class="side" style="display:flex;flex-direction:column;gap:12px">
+      <div class="box">
+        <div class="cap"><span>What reaches the model</span><span class="st" id="ctxst"></span></div>
+        <div class="qbox" id="qbox"></div>
+        <div class="ctx" id="ctx"></div>
+        <div class="budget" id="budget"></div>
+        <div class="verdict none" id="verdict"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>All six questions</span><span class="st" id="benchst"></span></div>
+        <div class="bench" id="bench"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>Sweep · answers by chunk size</span><span class="st">solid k=3, purple k=8, dashed tokens</span></div>
+        <div class="curve" id="curve"></div>
+        <div class="cnote" id="cnote"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="q 1">
+    </div>
+  </div>
+  <p class="hintbar"><code>q 1..6</code> · <code>chunk 1|2|3|doc</code> · <code>k N</code> · <code>mode lexical|dense|hybrid</code> ·
+  <code>rerank on|off</code> · <code>budget N</code> · <code>bench</code> · <code>sweep</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. The vectors are real
+    TF-IDF over the six documents in the source, compared by cosine; the map is classical
+    multidimensional scaling (power iteration on the double-centred similarity matrix), so two
+    chunks near each other really are similar. Each question's answer is a <em>span</em> of
+    sentences, and a question counts as answered only if every sentence of that span reaches
+    the model contiguously — which is why a chunk boundary through the middle of an answer
+    breaks it. <code>dense</code> expands the query through a hand-written synonym table,
+    standing in for what a trained embedding model knows and a bag of words cannot;
+    <code>rerank</code> is a second scorer that reads the whole chunk instead of its vector.
+    Position weighting uses the same "lost in the middle" discount as the context-engineering
+    sandbox. Tokens are characters ÷ 4.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. THE CORPUS
+   Each document is a list of sentences. Each question names a span of them:
+   the answer is only usable if the whole span arrives, contiguously.
+   ========================================================================= */
+const DOCS = [
+  { id: "infra", name: "infrastructure-spend.md", sents: [
+    "This note summarises infrastructure spend for the year and the work planned for the next two quarters.",
+    "Networking and egress remain small but are growing faster than anything else.",
+    "The analytics cluster is the largest line in our infrastructure budget.",
+    "It cost one point two million dollars last year, twelve percent more than the year before.",
+    "Storage growth drove most of that increase, while compute stayed flat after the autoscaling work.",
+    "The warehouse holds about four hundred terabytes, of which roughly half has not been queried in six months.",
+    "The team will tier cold data to object storage in the second half.",
+    "Reserved capacity is under review and could save a further eight percent.",
+    "We renegotiate the support contract in November.",
+    "Nothing in this plan requires additional headcount."] },
+  { id: "hiring", name: "hiring-notes.md", sents: [
+    "Notes from the quarterly hiring review, covering pipeline, timing and offer outcomes.",
+    "We closed twelve roles last quarter, eight of them in engineering.",
+    "Average time to hire was thirty-one days from first screen to offer.",
+    "Referrals convert about three times as often as cold applications.",
+    "The recruiting team ran ninety first screens to fill those twelve seats.",
+    "Two candidates declined offers, both citing compensation.",
+    "Every interview loop ends with a debrief within twenty-four hours.",
+    "Interviewers submit written feedback before the debrief, not during it.",
+    "The panel for senior roles now includes someone from outside the hiring team.",
+    "Next quarter we expect to open six more roles."] },
+  { id: "incidents", name: "incident-review.md", sents: [
+    "A review of production incidents for the quarter, with response times and follow-up actions.",
+    "There were four production incidents last quarter.",
+    "Every one was resolved inside thirty minutes.",
+    "Two of the four were caused by configuration changes deployed on a Friday.",
+    "The longest was a database failover in the payments service.",
+    "It took twenty-eight minutes to recover, most of that waiting for the replica to catch up.",
+    "We publish a postmortem for every incident within five working days.",
+    "Nobody is named as at fault in a postmortem.",
+    "Three follow-up actions from last quarter are still open.",
+    "Alerting coverage for the payments service has since been extended."] },
+  { id: "security", name: "security-policy.md", sents: [
+    "This policy covers access, secrets and vulnerability handling for production systems.",
+    "All production credentials are rotated every ninety days.",
+    "Access to the production database requires a second approver.",
+    "A critical vulnerability must be patched within seventy-two hours of disclosure.",
+    "Dependency audits run weekly and secrets are never committed to the repository.",
+    "Laptops are encrypted at rest and locked after five minutes idle.",
+    "Contractors receive time-limited access that expires automatically.",
+    "Any exception to this policy needs written approval from the security lead.",
+    "The policy is reviewed twice a year.",
+    "Questions go to the security channel."] },
+  { id: "travel", name: "travel-policy.md", sents: [
+    "Guidance for booking and expensing business travel.",
+    "Book flights at least fourteen days ahead where the schedule allows.",
+    "Economy is the default for any flight under six hours.",
+    "The daily meal allowance is sixty-five dollars per person.",
+    "Receipts are required for anything above twenty-five dollars.",
+    "Hotels should be booked through the corporate tool wherever it has coverage.",
+    "Expense reports are due within two weeks of returning.",
+    "Personal travel attached to a business trip is not reimbursed.",
+    "Rail is preferred over air for journeys under four hours.",
+    "Ask your manager before booking anything unusual."] },
+  { id: "product", name: "product-update.md", sents: [
+    "Product update for the quarter: what shipped, what moved and what is next.",
+    "Search relevance work started in parallel and is not yet measurable.",
+    "The checkout rebuild shipped in the second quarter.",
+    "It reduced cart abandonment by nine percent overall.",
+    "Mobile conversion improved more than desktop did.",
+    "The old checkout had accumulated six years of special cases and was retired entirely.",
+    "The next milestone is one-click reorder for returning customers.",
+    "A redesign of the account area is scheduled after that.",
+    "Support tickets about payment errors fell by a third.",
+    "None of this changed the pricing page."] }
+];
+const QUESTIONS = [
+  { text: "How much did the analytics cluster cost?", doc: "infra", span: [2, 3], note: "the subject is in one sentence and the number in the next" },
+  { text: "How long does it take to hire someone?", doc: "hiring", span: [2, 2], note: "one self-contained sentence" },
+  { text: "How long was the longest incident?", doc: "incidents", span: [4, 5], note: "\"the longest\" and \"twenty-eight minutes\" are different sentences" },
+  { text: "How often are passwords changed?", doc: "security", span: [1, 1], note: "the document says credentials rotated, never passwords changed" },
+  { text: "What is the daily meal allowance?", doc: "travel", span: [3, 3], note: "one self-contained sentence" },
+  { text: "How much did the checkout rebuild reduce cart abandonment?", doc: "product", span: [2, 3], note: "\"It\" carries the subject from the sentence before" }
+];
+/* what a trained embedding model knows and a bag of words does not */
+const SYN = { password: ["credential"], passwords: ["credentials"], changed: ["rotated"], change: ["rotate"],
+  flaw: ["vulnerability"], bug: ["vulnerability"], fixed: ["patched"], fix: ["patch"],
+  cost: ["dollars", "spend", "budget"], spend: ["cost", "budget"], drop: ["reduced"], reduce: ["reduced"],
+  allowance: ["meal", "dollars"], hire: ["hiring", "offer", "screen"], incident: ["failover", "outage"],
+  long: ["minutes", "days", "hours"], often: ["every", "weekly", "days"], much: ["percent", "dollars"] };
+
+/* ============================================================================
+   2. VECTORS: real TF-IDF + cosine
+   ========================================================================= */
+const STOP = new Set(["the", "a", "an", "of", "in", "to", "and", "is", "was", "were", "for", "on", "at", "it", "that", "with", "as", "by", "from", "our", "we", "his", "her", "their", "its", "be", "are", "or", "do", "did", "does", "how", "what", "when", "which", "there", "every", "any", "most", "more", "than", "under", "over", "within", "after", "before"]);
+const norm = w => w.toLowerCase().replace(/[^a-z0-9-]/g, "");
+const stemW = w => norm(w).replace(/(ing|ed|es|s)$/, "");
+const terms = t => t.split(/\s+/).map(stemW).filter(w => w.length > 1 && !STOP.has(w) && !STOP.has(norm(w)));
+const tok = t => Math.ceil((t || "").length / 4) + 2;
+
+function chunksOf(size) {
+  const out = [];
+  DOCS.forEach((d, di) => {
+    const n = size === "doc" ? d.sents.length : size;
+    for (let i = 0; i < d.sents.length; i += n) {
+      const idx = d.sents.map((_, j) => j).slice(i, i + n);
+      out.push({ id: `${d.id}#${out.filter(c => c.doc === d.id).length}`, doc: d.id, di, sents: idx, text: idx.map(j => d.sents[j]).join(" ") });
+    }
+  });
+  const df = new Map(); out.forEach(c => new Set(terms(c.text)).forEach(t => df.set(t, (df.get(t) || 0) + 1)));
+  out.forEach(c => { const tf = new Map(); terms(c.text).forEach(t => tf.set(t, (tf.get(t) || 0) + 1));
+    const v = new Map(); let n2 = 0;
+    tf.forEach((f, t) => { const w = (1 + Math.log(f)) * Math.log(out.length / df.get(t)); if (w > 0) { v.set(t, w); n2 += w * w; } });
+    const L = Math.sqrt(n2) || 1; v.forEach((w, t) => v.set(t, w / L)); c.v = v; c.tokens = tok(c.text); });
+  return { chunks: out, df };
+}
+function qVector(text, mode, df, N) {
+  let ts = terms(text);
+  if (mode !== "lexical") { const add = []; ts.forEach(t => { const key = Object.keys(SYN).find(k => stemW(k) === t); if (key) SYN[key].forEach(s => add.push(stemW(s))); }); ts = [...ts, ...add]; }
+  const tf = new Map(); ts.forEach(t => tf.set(t, (tf.get(t) || 0) + 1));
+  const v = new Map(); let n2 = 0;
+  tf.forEach((f, t) => { const d = df.get(t); if (!d) return; const w = (1 + Math.log(f)) * Math.log(N / d); if (w > 0) { v.set(t, w); n2 += w * w; } });
+  const L = Math.sqrt(n2) || 1; v.forEach((w, t) => v.set(t, w / L));
+  return { v, ts };
+}
+const cos = (a, b) => { let s = 0; const [x, y] = a.size < b.size ? [a, b] : [b, a]; x.forEach((w, t) => { const o = y.get(t); if (o) s += w * o; }); return s; };
+
+/* classical MDS by power iteration — deterministic, so the map is stable */
+function layout(chunks) {
+  const n = chunks.length; if (!n) return [];
+  const S = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => cos(chunks[i].v, chunks[j].v)));
+  const rm = S.map(r => r.reduce((a, b) => a + b, 0) / n); const gm = rm.reduce((a, b) => a + b, 0) / n;
+  const B = S.map((r, i) => r.map((v, j) => v - rm[i] - rm[j] + gm));
+  const evec = [];
+  for (let e = 0; e < 2; e++) {
+    let v = Array.from({ length: n }, (_, i) => Math.sin((i + 1) * (e + 1.7)));
+    let lam = 0;
+    for (let it = 0; it < 300; it++) {
+      const w = B.map(row => row.reduce((a, x, j) => a + x * v[j], 0));
+      const L = Math.sqrt(w.reduce((a, x) => a + x * x, 0)) || 1;
+      v = w.map(x => x / L); lam = L;
+    }
+    evec.push({ v, lam });
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) B[i][j] -= lam * v[i] * v[j];
+  }
+  return chunks.map((c, i) => ({ x: evec[0].v[i] * Math.sqrt(Math.max(evec[0].lam, 0)), y: evec[1].v[i] * Math.sqrt(Math.max(evec[1].lam, 0)) }));
+}
+
+/* ============================================================================
+   3. RETRIEVAL
+   ========================================================================= */
+const NUMWORD = /\b(one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|thirty|sixty|ninety|seventy|twenty-five|twenty-eight|thirty-one|sixty-five|seventy-two|percent|dollars|minutes|hours|days|million)\b/i;
+function rerankScore(chunk, qtext, qts) {
+  const have = new Set(terms(chunk.text));
+  const cover = qts.filter(t => have.has(t)).length / Math.max(1, new Set(qts).size);
+  const wantsNumber = /how (much|long|often|many)|what is the/i.test(qtext);
+  const bonus = wantsNumber && NUMWORD.test(chunk.text) ? 0.35 : 0;
+  return +(cover + bonus - 0.0008 * chunk.tokens).toFixed(4);
+}
+function retrieve(s, qi) {
+  const { chunks, df } = chunksOf(s.chunk); const pos = layout(chunks);
+  chunks.forEach((c, i) => { c.px = pos[i].x; c.py = pos[i].y; });
+  const Q = QUESTIONS[qi]; const { v: qv, ts } = qVector(Q.text, s.mode, df, chunks.length);
+  let scored = chunks.map(c => {
+    const lex = cos(qVector(Q.text, "lexical", df, chunks.length).v, c.v);
+    const den = cos(qv, c.v);
+    const score = s.mode === "lexical" ? lex : s.mode === "dense" ? den : Math.max(lex, den);
+    return { c, lex, den, score };
+  }).sort((a, b) => b.score - a.score);
+  const pool = s.rerank ? scored.slice(0, Math.min(scored.length, s.k * 4)) : scored;
+  let ranked = pool;
+  if (s.rerank) ranked = pool.map(r => ({ ...r, rr: rerankScore(r.c, Q.text, ts) })).sort((a, b) => b.rr - a.rr || b.score - a.score);
+  const top = ranked.slice(0, s.k).filter(r => r.score > 0.001 || s.rerank);
+  /* assemble the context in rank order, dropping whatever doesn't fit */
+  let used = 0; const ctx = [];
+  top.forEach(r => { const fits = used + r.c.tokens <= s.budget; if (fits) used += r.c.tokens; ctx.push({ ...r, fits }); });
+  const kept = ctx.filter(c => c.fits);
+  /* is the answer span present and contiguous in what was kept? */
+  const need = []; for (let j = Q.span[0]; j <= Q.span[1]; j++) need.push(j);
+  const fromDoc = kept.filter(c => c.c.doc === Q.doc).sort((a, b) => a.c.sents[0] - b.c.sents[0]);
+  const have = new Set(fromDoc.flatMap(c => c.c.sents));
+  const found = need.every(j => have.has(j));
+  let contiguous = false;
+  if (found) { const owners = need.map(j => fromDoc.findIndex(c => c.c.sents.includes(j)));
+    contiguous = owners.every((o, i) => i === 0 || o === owners[i - 1] || (o === owners[i - 1] + 1 && fromDoc[o].c.sents[0] === fromDoc[o - 1].c.sents.slice(-1)[0] + 1)); }
+  /* where did the answer land? lost in the middle over the assembled context */
+  let posw = 1, mid = 0;
+  if (found) { let before = 0; let spanTok = 0;
+    for (const c of kept) { if (c.c.doc === Q.doc && c.c.sents.some(j => need.includes(j))) { spanTok += c.c.tokens; break; } before += c.c.tokens; }
+    mid = used ? (before + spanTok / 2) / used : 0;
+    const depth = Math.max(0, Math.min(1, (used - 150) / 400));
+    posw = 1 - 0.5 * depth * 4 * mid * (1 - mid);
+  }
+  const answered = found && contiguous && posw >= 0.72;
+  const why = !found ? (kept.some(c => c.c.doc === Q.doc) ? "the right document came back, but not every sentence of the answer" : "the answer's chunk never came back")
+    : !contiguous ? "the answer's sentences arrived, but split across non-adjacent snippets"
+    : posw < 0.72 ? `the answer is buried at ${Math.round(mid * 100)}% through a ${used}-token context` : "the whole answer arrived, near the top";
+  return { Q, qi, chunks, ctx, kept, used, found, contiguous, posw, mid, answered, why, ts, truncated: ctx.filter(c => !c.fits).length, scored };
+}
+function bench(s) { const rows = QUESTIONS.map((_, i) => retrieve(s, i));
+  return { rows, n: rows.filter(r => r.answered).length, tokens: rows.reduce((a, r) => a + r.used, 0),
+           at: { chunk: s.chunk, k: s.k, mode: s.mode, rerank: s.rerank, budget: s.budget } }; }
+/* has the benchmark been run at exactly these settings? */
+const benchFresh = s => !!s.benchR && ["chunk", "k", "mode", "rerank", "budget"].every(f => s.benchR.at[f] === s[f]);
+
+/* ============================================================================
+   4. STATE + COMMANDS
+   ========================================================================= */
+function initialState() { return { chunk: 2, k: 3, mode: "lexical", rerank: false, budget: 600, qi: null, sel: null, benchR: null, sweep: null }; }
+const clone = s => structuredClone(s);
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const chunkLabel = c => c === "doc" ? "whole document" : `${c} sentence${c > 1 ? "s" : ""}`;
+
+const REGISTRY = {
+  "q": (s, args) => { const i = +args[0] - 1; if (!(i >= 0 && i < QUESTIONS.length)) return fail(`q 1–${QUESTIONS.length}`); const n = clone(s); n.qi = i; n.sel = null;
+    const r = retrieve(n, i);
+    return { state: n, out: [line(`"${r.Q.text}"`, "q"),
+      ...r.ctx.map((c, j) => line(`  ${j + 1}. ${c.c.id} score ${c.score.toFixed(3)}${c.rr !== undefined ? ` rerank ${c.rr.toFixed(2)}` : ""}${c.fits ? "" : " — dropped, over budget"}`, c.c.doc === r.Q.doc ? "g" : "ok")),
+      line(`  ${r.answered ? "✓ answered" : "✗ not answered"}: ${r.why}`, r.answered ? "g" : "err")] }; },
+  "chunk": (s, args) => { const v = args[0] === "doc" ? "doc" : +args[0]; if (v !== "doc" && !(v >= 1 && v <= 5)) return fail("chunk 1|2|3|doc"); const n = clone(s); n.chunk = v; n.sel = null; n.benchR = null;
+    const { chunks } = chunksOf(v); return { state: n, out: [line(`${chunkLabel(v)} per chunk → ${chunks.length} chunks, ${Math.round(chunks.reduce((a, c) => a + c.tokens, 0) / chunks.length)} tokens each on average`, "m")] }; },
+  "k": (s, args) => { const v = +args[0]; if (!(v >= 1 && v <= 20)) return fail("k 1–20"); const n = clone(s); n.k = v; n.benchR = null; return { state: n, out: [line(`k = ${v}: the ${v} nearest chunks go into the prompt`, "m")] }; },
+  "mode": (s, args) => { if (!/^(lexical|dense|hybrid)$/.test(args[0] || "")) return fail("mode lexical|dense|hybrid"); const n = clone(s); n.mode = args[0]; n.benchR = null;
+    const d = { lexical: "word overlap only — a query word the documents never use scores zero", dense: "the query is expanded to what an embedding model would consider close", hybrid: "the better of the two scores per chunk" };
+    return { state: n, out: [line(`${args[0]}: ${d[args[0]]}`, "m")] }; },
+  "rerank": (s, args) => { if (!/^(on|off)$/.test(args[0] || "")) return fail("rerank on|off"); const n = clone(s); n.rerank = args[0] === "on"; n.benchR = null;
+    return { state: n, out: [line(n.rerank ? `on: fetch ${n.k * 4} candidates by vector, then reorder them with a scorer that reads the text, and keep ${n.k}` : "off: the vector ranking is final", "m")] }; },
+  "budget": (s, args) => { const v = +args[0]; if (!(v >= 40 && v <= 2000)) return fail("budget 40–2000"); const n = clone(s); n.budget = v; n.benchR = null; return { state: n, out: [line(`context budget ${v} tokens`, "dim")] }; },
+  "bench": s => { const n = clone(s); n.benchR = bench(n);
+    return { state: n, out: [line(`${chunkLabel(n.chunk)} · k=${n.k} · ${n.mode}${n.rerank ? " · rerank" : ""}: ${n.benchR.n}/6 answered · ${n.benchR.tokens} tokens total`, n.benchR.n === 6 ? "g" : "err"),
+      ...n.benchR.rows.map((r, i) => line(`  ${i + 1}. ${r.answered ? "✓" : "✗"} ${r.Q.text}${r.answered ? "" : " — " + r.why}`, r.answered ? "ok" : "err"))] }; },
+  "sweep": s => { const n = clone(s); const sizes = [1, 2, 3, "doc"];
+    n.sweep = sizes.map(sz => { const a = bench({ ...n, chunk: sz, k: 3 }), b = bench({ ...n, chunk: sz, k: 8 }); return { size: sz, k3: a.n, k8: b.n, t3: Math.round(a.tokens / 6), t8: Math.round(b.tokens / 6) }; });
+    return { state: n, out: [line("chunk    k=3 answered  tokens   k=8 answered  tokens", "dim"),
+      ...n.sweep.map(r => line(`${String(chunkLabel(r.size)).padEnd(8)} ${String(r.k3 + "/6").padStart(11)} ${String(r.t3).padStart(8)} ${String(r.k8 + "/6").padStart(13)} ${String(r.t8).padStart(8)}`, "ok"))] }; },
+  "show": (s, args) => { const { chunks } = chunksOf(s.chunk); const c = chunks.find(x => x.id === args[0]); if (!c) return fail(`show <chunk id>, e.g. ${chunks[0].id}`); const n = clone(s); n.sel = c.id;
+    return { state: n, out: [line(`${c.id} · ${c.tokens} tokens`, "m"), line(`  ${c.text}`, "ok")] }; },
+  "help": () => ({ out: [
+    line("q 1–6                       ask one of the six questions", "q"),
+    line("chunk 1|2|3|doc             how the documents are cut up", "m"),
+    line("k N                         how many chunks are retrieved", "m"),
+    line("mode lexical|dense|hybrid   how similarity is scored", "m"),
+    line("rerank on|off               second-stage scoring over the text", "m"),
+    line("budget N                    context token budget", "ok"),
+    line("bench · sweep · show <id> · restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase(); if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1).map(x => x.toLowerCase()), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   5. RENDERER
+   ========================================================================= */
+const esc = t => t.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const dcol = i => `var(--d${i % 6})`;
+function render(s) {
+  const R = s.qi !== null ? retrieve(s, s.qi) : null;
+  const { chunks } = R ? { chunks: R.chunks } : (() => { const c = chunksOf(s.chunk); const p = layout(c.chunks); c.chunks.forEach((x, i) => { x.px = p[i].x; x.py = p[i].y; }); return c; })();
+  d3.select("#knobs").html(
+    `<span class="l">chunk</span>` + [1, 2, 3, "doc"].map(v => `<button class="k${s.chunk === v ? " on" : ""}" data-c="chunk ${v}">${v}</button>`).join("") +
+    `<span class="l">k</span>` + [1, 3, 5, 8, 12].map(v => `<button class="k${s.k === v ? " on" : ""}" data-c="k ${v}">${v}</button>`).join("") +
+    `<span class="l">mode</span>` + ["lexical", "dense", "hybrid"].map(v => `<button class="k${s.mode === v ? " on" : ""}" data-c="mode ${v}">${v}</button>`).join("") +
+    `<span class="l">rerank</span><button class="k${s.rerank ? " on" : ""}" data-c="rerank ${s.rerank ? "off" : "on"}">${s.rerank ? "on" : "off"}</button>` +
+    `<span class="l">ask</span>` + QUESTIONS.map((_, i) => `<button class="k${s.qi === i ? " on" : ""}" data-c="q ${i + 1}">${i + 1}</button>`).join(""));
+  d3.selectAll("#knobs .k").on("click", function () { run(this.dataset.c); });
+
+  /* map */
+  const W = 620, H = 330, pad = 26;
+  const xs = d3.scaleLinear().domain(d3.extent(chunks, c => c.px)).range([pad, W - pad]).nice();
+  const ys = d3.scaleLinear().domain(d3.extent(chunks, c => c.py)).range([H - pad, pad]).nice();
+  const ranks = new Map(R ? R.ctx.map((c, i) => [c.c.id, { rank: i + 1, fits: c.fits }]) : []);
+  /* the query sits at the weighted centre of what it matched, so "near" is visible */
+  let qx = null, qy = null;
+  if (R) { const tot = R.scored.slice(0, 8).reduce((a, r) => a + r.score, 0);
+    if (tot > 0.001) { qx = R.scored.slice(0, 8).reduce((a, r) => a + r.score * r.c.px, 0) / tot; qy = R.scored.slice(0, 8).reduce((a, r) => a + r.score * r.c.py, 0) / tot; } }
+  const answerIds = new Set(R ? chunks.filter(c => c.doc === R.Q.doc && c.sents.some(j => j >= R.Q.span[0] && j <= R.Q.span[1])).map(c => c.id) : []);
+  const rays = R && qx !== null ? R.ctx.filter(c => c.fits).map((c, i) => `<line class="ray${i === 0 ? " top" : ""}" x1="${xs(qx)}" y1="${ys(qy)}" x2="${xs(c.c.px)}" y2="${ys(c.c.py)}"/>`).join("") : "";
+  const dots = chunks.map(c => { const rk = ranks.get(c.id);
+    return `<g class="dot${rk && rk.fits ? " ret" : ""}${answerIds.has(c.id) ? " ans" : ""}${s.sel === c.id ? " sel" : ""}" data-id="${c.id}" transform="translate(${xs(c.px)},${ys(c.py)})">
+      <circle r="${4 + Math.sqrt(c.tokens) / 2.2}" fill="${dcol(c.di)}" fill-opacity="${rk && rk.fits ? 0.5 : 0.16}" stroke="${dcol(c.di)}"/>
+      ${rk ? `<text class="rank" x="0" y="-${7 + Math.sqrt(c.tokens) / 2.2}" text-anchor="middle">${rk.fits ? rk.rank : "×"}</text>` : ""}
+      <title>${esc(c.id)} · ${c.tokens} tokens\n${esc(c.text)}</title></g>`; }).join("");
+  const qmark = R && qx !== null ? `<g><line class="qx" x1="${xs(qx) - 6}" y1="${ys(qy)}" x2="${xs(qx) + 6}" y2="${ys(qy)}"/><line class="qx" x1="${xs(qx)}" y1="${ys(qy) - 6}" x2="${xs(qx)}" y2="${ys(qy) + 6}"/><text class="lbl" x="${xs(qx) + 8}" y="${ys(qy) - 6}" fill="#e8a33d">query</text></g>` : "";
+  d3.select("#map").html(rays + dots + qmark + (R && qx === null ? `<text class="lbl" x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="#e06c6c">the query matched nothing at all — no vector to place</text>` : ""));
+  d3.selectAll("#map .dot").on("click", function () { run(`show ${this.dataset.id}`); });
+  d3.select("#mapst").text(`${chunks.length} chunks · ${chunkLabel(s.chunk)}`);
+  d3.select("#maplg").html(DOCS.map((d, i) => `<span><i style="background:${dcol(i)}"></i>${d.name}</span>`).join("") + `<span><i style="background:transparent;border:1.5px solid var(--hit)"></i>holds the answer</span>`);
+  const selc = chunks.find(c => c.id === s.sel);
+  d3.select("#peek").html(selc ? `<b>${selc.id}</b> <span class="m">${selc.tokens} tokens · sentences ${selc.sents.join(", ")}</span><br>${esc(selc.text)}` : `<span class="m">click a dot to read the chunk. Dot size is its token count; distance is cosine similarity, laid out by multidimensional scaling.</span>`);
+
+  /* context */
+  d3.select("#qbox").html(R ? esc(R.Q.text) : `<span class="none">pick a question</span>`);
+  const cx = d3.select("#ctx");
+  if (!R) cx.html(`<div class="none">nothing retrieved yet</div>`);
+  else if (!R.ctx.length) cx.html(`<div class="none">nothing scored above zero — the retriever returned an empty context</div>`);
+  else cx.html(R.ctx.map((c, i) => { const isAns = c.c.doc === R.Q.doc && c.c.sents.some(j => j >= R.Q.span[0] && j <= R.Q.span[1]);
+    const full = isAns && [...Array(R.Q.span[1] - R.Q.span[0] + 1)].every((_, j) => c.c.sents.includes(R.Q.span[0] + j));
+    let body = esc(c.c.text);
+    if (isAns) { const hl = DOCS.find(d => d.id === R.Q.doc).sents.filter((_, j) => j >= R.Q.span[0] && j <= R.Q.span[1] && c.c.sents.includes(j)); hl.forEach(h => { body = body.replace(esc(h), `<em>${esc(h)}</em>`); }); }
+    return `<div class="ck${isAns ? (full ? " ans" : " part") : ""}${c.fits ? "" : " cutoff"}"><div class="h"><span>${i + 1}. ${c.c.id}${isAns ? ` · <b>${full ? "the answer" : "part of the answer"}</b>` : ""}</span><span>${c.c.tokens}t · ${c.score.toFixed(3)}${c.rr !== undefined ? ` → ${c.rr.toFixed(2)}` : ""}${c.fits ? "" : " · dropped"}</span></div>${body}</div>`; }).join(""));
+  const bd = d3.select("#budget");
+  if (!R) bd.html("");
+  else { const scale = Math.max(s.budget, R.ctx.reduce((a, c) => a + c.c.tokens, 0));
+    bd.html(`<div class="bar">${R.ctx.map((c, i) => `<i style="width:${c.c.tokens / scale * 100}%;background:${c.fits ? dcol(c.c.di) : "var(--line)"};opacity:${c.fits ? 0.75 : 0.4}"></i>`).join("")}<div class="lim" style="left:${s.budget / scale * 100}%"></div></div><div class="lbl"><span>${R.used} / ${s.budget} tokens used${R.truncated ? ` · ${R.truncated} chunk(s) dropped` : ""}</span><span>${R.found ? `answer at ${Math.round(R.mid * 100)}% · weight ${R.posw.toFixed(2)}` : "answer absent"}</span></div>`); }
+  const v = d3.select("#verdict");
+  if (!R) v.attr("class", "verdict none").html("");
+  else v.attr("class", "verdict " + (R.answered ? "good" : "bad")).html(`${R.answered ? "answered" : "not answered"}<div class="why">${esc(R.why)}. <span style="color:var(--ink-dim)">${esc(R.Q.note)}.</span></div>`);
+  d3.select("#ctxst").text(R ? `k=${s.k} · ${s.mode}${s.rerank ? " · rerank" : ""}` : "");
+
+  /* bench + sweep */
+  const B = s.benchR, bv = d3.select("#bench");
+  if (!B) { bv.html(`<div class="none">bench runs all six questions at the current settings</div>`); d3.select("#benchst").text(""); }
+  else { bv.html(`<table><thead><tr><th>question</th><th>result</th><th class="n">tokens</th></tr></thead><tbody>${B.rows.map((r, i) => `<tr><td>${i + 1}. ${esc(r.Q.text.slice(0, 34))}${r.Q.text.length > 34 ? "…" : ""}</td><td class="${r.answered ? "ok" : "bad"}">${r.answered ? "answered" : esc(r.why.slice(0, 26))}</td><td class="n">${r.used}</td></tr>`).join("")}</tbody></table><div class="tot"><span class="a ${B.n === 6 ? "good" : "bad"}">${B.n}/6 answered</span><span>${B.tokens} tokens</span></div>`);
+    d3.select("#benchst").text(`${chunkLabel(s.chunk)} · k=${s.k}`); }
+  const S = s.sweep, cv = d3.select("#curve");
+  if (!S) { cv.html(`<div class="none">sweep compares chunk sizes at k=3 and k=8</div>`); d3.select("#cnote").text(""); }
+  else { const W2 = 300, H2 = 150, l = 26, r2 = 30, t = 12, b = 22;
+    const xs2 = d3.scalePoint().domain(S.map(x => String(x.size))).range([l, W2 - r2]);
+    const ys2 = d3.scaleLinear().domain([0, 6]).range([H2 - b, t]);
+    const yt = d3.scaleLinear().domain([0, Math.max(...S.map(x => Math.max(x.t3, x.t8)))]).range([H2 - b, t]);
+    const P = (key, sc) => d3.line().x(d => xs2(String(d.size))).y(d => sc(d[key]))(S);
+    cv.html(`<svg viewBox="0 0 ${W2} ${H2}"><line class="ax" x1="${l}" x2="${W2 - r2}" y1="${H2 - b}" y2="${H2 - b}"/><line class="ax" x1="${l}" x2="${l}" y1="${t}" y2="${H2 - b}"/>
+      <path class="k3" d="${P("k3", ys2)}"/><path class="k8" d="${P("k8", ys2)}"/><path class="tk" d="${P("t8", yt)}"/>
+      ${S.map(x => `<text x="${xs2(String(x.size))}" y="${H2 - 8}" text-anchor="middle">${x.size}</text>`).join("")}
+      <text x="${l - 3}" y="${ys2(6) + 3}" text-anchor="end">6</text><text x="${l - 3}" y="${H2 - b}" text-anchor="end">0</text>
+      <text x="${l + 3}" y="${t + 3}" fill="#6fbf73">k=3</text><text x="${l + 32}" y="${t + 3}" fill="#b08be8">k=8</text><text x="${W2 - r2 + 2}" y="${t + 3}" fill="#e8a33d">tok</text></svg>`);
+    const best = S.slice().sort((a, b2) => b2.k3 - a.k3 || a.t3 - b2.t3)[0];
+    d3.select("#cnote").text(`best at k=3: ${chunkLabel(best.size)} — ${best.k3}/6 for ${best.t3} tokens a query. k=8 answers ${S.reduce((a, x) => a + x.k8, 0) - S.reduce((a, x) => a + x.k3, 0) >= 0 ? "no fewer" : "fewer"} but costs ${Math.round(S.reduce((a, x) => a + x.t8, 0) / S.reduce((a, x) => a + x.t3, 0) * 10) / 10}× the tokens.`); }
+}
+
+/* ============================================================================
+   6. LESSON
+   ========================================================================= */
+const LESSON = [
+  { title: "Six documents, cut into chunks",
+    body: `Every chunk becomes a TF-IDF vector, and the map places similar chunks near each
+    other — so sentences from the same document cluster, because they share words. Dot size is
+    the chunk's token count. Start at the finest setting: one sentence per chunk, sixty chunks.`,
+    try: "chunk 1", expect: /^chunk 1$/,
+    needs: s => s.chunk !== 1 },
+
+  { title: "A question is a vector too",
+    body: `The question becomes a vector the same way and lands on the same map. The amber cross
+    sits where its matches are, and lines run to the three chunks that came back. Retrieval is
+    nothing more than "which vectors are nearest" — the green ring marks where the answer
+    actually lives.`,
+    try: "q 3", expect: /^q 3$/,
+    needs: s => s.chunk === 1 && s.qi !== 2 },
+
+  { title: "Chunks too small split the answer",
+    body: `Read the verdict. The retriever found "The longest was a database failover" — but
+    "It took twenty-eight minutes to recover" is a separate sentence containing none of the
+    query's words, so it scored near zero and never came back. The right document arrived and
+    the answer still isn't in the prompt.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.chunk === 1 && s.qi === 2 && !benchFresh(s) },
+
+  { title: "Two sentences per chunk",
+    body: `Four of six at forty-three tokens a query. Now widen the chunks: the same
+    boundaries fall differently, and the split answer lands inside one chunk. Nothing about the
+    retriever changed — the preprocessing did.`,
+    try: "chunk 2", expect: /^chunk 2$/,
+    needs: s => s.chunk !== 2 },
+
+  { title: "…and the benchmark",
+    body: `Five of six. Sixty-eight tokens a query. The one that still fails is a different
+    problem, and we'll come back to it.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.chunk === 2 && s.mode === "lexical" && !benchFresh(s) },
+
+  { title: "Chunks too big cost a fortune",
+    body: `The other extreme: one chunk per document, six chunks of 150 to 200 tokens each.
+    Every answer is certainly inside its chunk now, so surely this is safer.`,
+    try: "chunk doc", expect: /^chunk doc$/,
+    needs: s => s.chunk !== "doc" },
+
+  { title: "…same answers, four times the bill",
+    body: `Still five of six — and 277 tokens a query instead of 68. You are paying to put two
+    entire documents of unrelated prose in front of the model on every single question, and
+    buying nothing with it. At a realistic corpus size that is the difference between a viable
+    product and an unaffordable one.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.chunk === "doc" && s.mode === "lexical" && !benchFresh(s) },
+
+  { title: "Back to two",
+    body: `The middle is where retrieval lives. Not a rule of thumb — a measurable optimum for
+    a given corpus, a given set of questions and a given budget.`,
+    try: "chunk 2", expect: /^chunk 2$/,
+    needs: s => s.chunk !== 2 },
+
+  { title: "The words don't match",
+    body: `Now the stubborn one. Question four asks how often <em>passwords</em> are
+    <em>changed</em>; the policy says <em>credentials</em> are <em>rotated</em>. Not one word in
+    common, so every cosine is zero and the retriever hands back whatever noise scored highest
+    — hiring notes, a product line. Nothing indicates failure. This is the biggest weakness of
+    keyword search, and it looks like confidence.`,
+    try: "q 4", expect: /^q 4$/,
+    needs: s => s.qi !== 3 && s.mode === "lexical" && s.chunk === 2 },
+
+  { title: "Embeddings know synonyms",
+    body: `A trained embedding model has seen "password" and "credential" in the same contexts
+    a million times, so their vectors sit close together even though the strings share nothing.
+    Here that knowledge is a small synonym table, but the effect is the one that matters: the
+    query now reaches the right chunk.`,
+    try: "mode dense", expect: /^mode dense$/,
+    needs: s => s.mode !== "dense" },
+
+  { title: "Hybrid keeps both",
+    body: `Dense retrieval is fuzzy in the other direction: it will cheerfully return something
+    topically close when you wanted an exact string — a product code, an error number, a
+    surname. Production systems run both and take the better score for each chunk.`,
+    try: "mode hybrid", expect: /^mode hybrid$/,
+    needs: s => s.mode !== "hybrid" },
+
+  { title: "…all six",
+    body: `Six of six at 109 tokens a query. Better scoring costs nothing at generation time —
+    it changes which chunks are chosen, not how many.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.mode === "hybrid" && s.chunk === 2 && !s.rerank && s.k === 3 && !benchFresh(s) },
+
+  { title: "More is not better",
+    body: `The obvious way to stop missing things: retrieve more. Turn k up to twelve, so every
+    answer is certainly somewhere in the prompt.`,
+    try: "k 12", expect: /^k 12$/,
+    needs: s => s.k !== 12 },
+
+  { title: "…still six, at two and a half times the price",
+    body: `270 tokens a query instead of 109, and not one extra question answered. Nine of the
+    twelve chunks are irrelevant text the model must read past on every call. Recall is not the
+    metric; what reaches the model, and what you paid to put it there, is the metric.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.k === 12 && s.mode === "hybrid" && s.chunk === 2 && !s.rerank && !benchFresh(s) },
+
+  { title: "Rerank: fetch wide, keep narrow",
+    body: `The standard resolution. Cast a wide net cheaply with vectors, then score those
+    candidates with something slower and better that reads the actual text rather than a bag of
+    words, and keep only the best few.`,
+    try: "rerank on", expect: /^rerank on$/,
+    needs: s => !s.rerank },
+
+  { title: "…narrow the window",
+    body: `With reranking on, k is what survives <em>after</em> reordering and the candidate
+    pool is four times that. Back to three.`,
+    try: "k 3", expect: /^k 3$/,
+    needs: s => s.rerank && s.k !== 3 },
+
+  { title: "…six of six, small context",
+    body: `106 tokens a query — the accuracy of the wide net at the cost of the narrow one. That
+    two-stage shape, cheap and wide then expensive and narrow, is what nearly every production
+    retrieval system converges on.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.rerank && s.k === 3 && s.mode === "hybrid" && s.chunk === 2 && !benchFresh(s) },
+
+  { title: "The whole trade-off at once",
+    body: `Sweep the chunk sizes at k=3 and k=8. There is no universally right chunk size and no
+    universally right k — there is a curve, and it belongs to your corpus, your questions and
+    your budget. The only way to find your point on it is to measure, which is what an eval set
+    is for.`,
+    try: "sweep", expect: /^sweep$/,
+    needs: s => !s.sweep },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>chunk doc</code> with hybrid retrieval
+    and ask question 1 — the answer arrives and still fails, because it is buried in a
+    500-token context. Or <code>budget 60</code> to watch chunks fall off the end of the prompt
+    and notice that the answers survive anyway, because good ranking put them first;
+    <code>mode lexical</code> with <code>rerank on</code> to see that reranking cannot rescue a
+    query that retrieved nothing; or click any dot to read the chunk behind it.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   7. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Retrieval sandbox loaded. Type 'help', or: q 1", "dim");
+</script>
+</body>
+</html>
