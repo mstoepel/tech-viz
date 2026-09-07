@@ -25,9 +25,7 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 | 08 | AI systems | [ai/retrieval.html](ai/retrieval.html) | RAG as search with a token budget: real TF-IDF vectors on an MDS similarity map, answers defined as sentence spans so chunk boundaries genuinely break them, vocabulary mismatch, dense and hybrid scoring, k that costs without helping, and two-stage reranking |
 | 09 | AI systems | [ai/inference-serving.html](ai/inference-serving.html) | A discrete-event serving simulator: step time dominated by weight loading so batching is nearly free, static vs continuous batching, reserved vs paged KV cache, admission headroom, preemption and recompute, and the throughput/time-per-token knee |
 | 04 | AI systems | [ai/post-training.html](ai/post-training.html) | Post-training on a categorical policy over seven answers: SFT cross-entropy, Bradley-Terry reward model from biased labeler comparisons, RLHF policy gradient with a KL leash, reward hacking, the closed-form optimum, DPO |
-
 | 01 | Spark | [spark/lazy-plans.html](spark/lazy-plans.html) | Lazy evaluation, the logical plan, a four-rule optimizer (filter merge, predicate pushdown, column pruning, projection collapse), exchanges, stages, tasks, shuffle partitions, broadcast joins |
-
 | 02 | Spark | [spark/shuffle.html](spark/shuffle.html) | A tick-driven scheduler: driver, executors and cores, tasks per partition, the timeline, the 200-partition default, adaptive coalescing, broadcast vs sort-merge, skew and the straggler, AQE skew split, caching |
 
 Candidates for the next round: DNS resolution, TLS handshake, B-tree indexes, consistent
