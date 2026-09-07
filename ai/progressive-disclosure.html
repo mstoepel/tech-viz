@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Index first, fetch on demand — a context engineering sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Three tiers, three colours: always-loaded core is faint, the index is
+   purple, bodies are amber. Green marks the skill a task actually needed;
+   red marks a wrong pick. The context block diagram uses the same three.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --core:#5d6d7c; --index:#b08be8; --body:#e8a33d; --right:#6fbf73; --wrong:#e06c6c; --task:#5cc8d6;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--index)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--index);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--index);color:var(--index)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--index);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the prompt as stacked blocks whose widths are tokens —
+   core, catalogue (index or full bodies), task, fetched bodies — against
+   the window limit; the catalogue beside it showing which tier each skill
+   is in; and the cost/accuracy curve as the catalogue grows.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.stage{display:grid;grid-template-columns:270px 1fr;gap:12px;align-items:start}
+.side{display:flex;flex-direction:column;gap:12px}
+.knobs{display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line);font-family:var(--code);font-size:10.5px;color:var(--ink-faint);align-items:center}
+.knobs .k{padding:2px 8px;font-size:10.5px}
+.knobs .k.on{border-color:var(--index);color:var(--index);background:rgba(176,139,232,.1)}
+.knobs .k.on.warn{border-color:var(--body);color:var(--body);background:rgba(232,163,61,.1)}
+.knobs span.l{margin-left:6px}
+.cat{padding:6px 10px;display:flex;flex-direction:column;gap:3px;max-height:420px;overflow-y:auto;font-family:var(--code);font-size:10.5px}
+.sk{display:grid;grid-template-columns:1fr auto;gap:6px;padding:3px 6px;border-radius:3px;border:1px solid transparent;color:var(--ink-dim);align-items:center}
+.sk .n{color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sk .d{color:var(--ink-faint);font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;grid-column:1 / -1;margin-top:-1px}
+.sk .t{font-size:9.5px;color:var(--ink-faint);white-space:nowrap}
+.sk.full{border-color:rgba(232,163,61,.35);background:rgba(232,163,61,.06)}
+.sk.indexed{border-color:rgba(176,139,232,.3)}
+.sk.fetched{border-color:var(--body);background:rgba(232,163,61,.14)}
+.sk.need .n{color:var(--right)}
+.sk.picked.bad{border-color:var(--wrong);background:rgba(224,108,108,.1)} .sk.picked.bad .n{color:var(--wrong)}
+.sk.picked.good{border-color:var(--right)}
+.tiers{padding:6px 12px 8px;font-family:var(--code);font-size:10px;color:var(--ink-faint);border-top:1px solid var(--line);display:flex;gap:10px;flex-wrap:wrap}
+.tiers b{font-weight:400} .tiers b.core{color:var(--core)} .tiers b.index{color:var(--index)} .tiers b.body{color:var(--body)}
+.ctxv{padding:12px}
+.call{margin-bottom:10px}
+.call .h{font-family:var(--code);font-size:10.5px;color:var(--ink-dim);display:flex;justify-content:space-between;margin-bottom:4px}
+.call .h b{font-weight:400;color:var(--ink)}
+.bar{position:relative;height:26px;background:var(--panel-2);border-radius:3px;overflow:hidden;display:flex}
+.bar i{display:block;height:100%;position:relative;min-width:1px}
+.bar i.core{background:var(--core)} .bar i.index{background:var(--index)} .bar i.bodies{background:var(--body)} .bar i.task{background:var(--task)} .bar i.fetched{background:var(--body);outline:1px solid #12181f}
+.bar i span{position:absolute;left:4px;top:0;line-height:26px;font-family:var(--code);font-size:9.5px;color:#12181f;white-space:nowrap;overflow:hidden;max-width:calc(100% - 6px);text-overflow:ellipsis}
+.bar .lim{position:absolute;top:0;bottom:0;width:2px;background:var(--wrong)}
+.bar.over{outline:1.5px solid var(--wrong)}
+.call .pick{font-family:var(--code);font-size:10.5px;margin-top:4px;color:var(--ink-dim)}
+.call .pick .g{color:var(--right)} .call .pick .b{color:var(--wrong)}
+.call .pick .sc{color:var(--ink-faint)}
+.ctxv .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.legend{font-family:var(--code);font-size:10px;color:var(--ink-faint);display:flex;gap:10px;flex-wrap:wrap;padding:0 12px 10px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.bench{padding:8px 12px;font-family:var(--code);font-size:10.5px}
+.bench table{border-collapse:collapse;width:100%}
+.bench th{font-weight:400;color:var(--ink-faint);font-size:9.5px;text-align:left;letter-spacing:.06em;text-transform:uppercase;padding:3px 4px;border-bottom:1px solid var(--line)}
+.bench td{padding:3px 4px;border-bottom:1px solid rgba(46,58,71,.5);color:var(--ink-dim)}
+.bench td.n{text-align:right;color:var(--ink)} .bench td.ok{color:var(--right)} .bench td.bad{color:var(--wrong)}
+.bench .tot{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--ink);padding:6px 0 2px;display:flex;justify-content:space-between;gap:8px}
+.bench .tot .a.good{color:var(--right)} .bench .tot .a.bad{color:var(--wrong)}
+.bench .none{color:var(--ink-faint)}
+.curve{padding:8px 12px 6px}
+.curve svg{display:block;width:100%;height:170px}
+.curve text{font-family:var(--code);font-size:9px;fill:var(--ink-faint)}
+.curve .ax{stroke:var(--line)}
+.curve path{fill:none;stroke-width:1.8}
+.curve .e{stroke:var(--body)} .curve .p{stroke:var(--index)} .curve .ea{stroke:var(--body);stroke-dasharray:3 3;stroke-width:1.2} .curve .pa{stroke:var(--index);stroke-dasharray:3 3;stroke-width:1.2}
+.curve .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.cnote{font-family:var(--code);font-size:10px;color:var(--ink-faint);padding:0 12px 10px;line-height:1.5}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--index)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .i{color:var(--index)} .log .b{color:var(--body)} .log .g{color:var(--right)} .log .err{color:var(--wrong)} .log .t{color:var(--task)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--index)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:800px){ .stage{grid-template-columns:1fr} .cat{max-height:260px} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 06 · AI systems</p>
+  <h1>Tell the model what exists. Show it only what it <em>needs</em></h1>
+  <p class="standfirst">An agent with fifty skills can't carry fifty manuals in every prompt.
+  Progressive disclosure is the alternative: an always-loaded core, a one-line index of
+  everything available, and full instructions fetched only when a task calls for them. It costs
+  an extra round trip and moves the whole burden onto the one-liners. Grow the catalogue,
+  switch the loading mode, and watch cost and accuracy.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>The catalogue</span><span class="st" id="catst"></span></div>
+      <div class="knobs" id="knobs"></div>
+      <div class="cat" id="cat"></div>
+      <div class="tiers" id="tiers"></div>
+    </div>
+    <div class="side">
+      <div class="box">
+        <div class="cap"><span>The prompt, call by call</span><span class="st" id="ctxst"></span></div>
+        <div class="ctxv" id="ctxv"></div>
+        <div class="legend"><span><i style="background:var(--core)"></i>core rules · always</span><span><i style="background:var(--index)"></i>index · one line per skill</span><span><i style="background:var(--body)"></i>skill bodies</span><span><i style="background:var(--task)"></i>the task</span><span><i style="background:var(--wrong);width:2px"></i>window limit</span></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>Benchmark · 8 tasks</span><span class="st" id="benchst"></span></div>
+        <div class="bench" id="bench"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>As the catalogue grows</span><span class="st">tokens per task · accuracy (dashed)</span></div>
+        <div class="curve" id="curve"></div>
+        <div class="cnote" id="cnote"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="task 1">
+    </div>
+  </div>
+  <p class="hintbar"><code>catalogue 5|10|20|50</code> · <code>mode eager|progressive</code> · <code>task 1..8</code> · <code>bench</code> ·
+  <code>curve</code> · <code>descriptions good|vague</code> · <code>limit tokens 8000</code> · <code>show xlsx</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. The catalogue is twelve
+    real skills plus generated distractors whose bodies cross-reference other domains the way
+    real documentation does ("not for spreadsheets — see xlsx"). The "model" picks a skill by
+    keyword overlap between the task and whatever text is visible to it: descriptions count
+    two per matching word, body text one per occurrence (capped at two), and once the prompt
+    passes about six thousand tokens, matches in the middle of it are discounted — the
+    "lost in the middle" effect measured in real models. Those two mechanisms, incidental
+    matches and fading attention, are why eager loading gets confused as the catalogue grows.
+    Token counts are characters ÷ 4. The curves are illustrative in magnitude and real in shape.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. THE CATALOGUE
+   ========================================================================= */
+const tok = t => Math.ceil((t || "").length / 4) + 2;
+function hashStr(str) { let h = 0x811c9dc5; for (const ch of str) { h ^= ch.charCodeAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h; }
+const STOP = new Set(["the", "a", "an", "and", "or", "to", "of", "for", "with", "in", "on", "this", "that", "it", "is", "are", "be", "as", "at", "by", "from", "into", "our", "my", "your", "then", "use", "when", "not", "see", "instead"]);
+const stem = w => w.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/(ches|shes|sses|xes)$/, m => m.slice(0, -2)).replace(/(ing|ed|s)$/, "").replace(/(.)\1$/, "$1");
+const words = t => [...new Set(t.split(/\s+/).map(stem).filter(w => w.length > 2 && !STOP.has(w)))];
+
+const REAL = [
+  { name: "xlsx", kw: ["spreadsheet", "xlsx", "formula", "chart", "totals", "workbook"], good: "Create and edit spreadsheets (.xlsx): formulas, totals, formatting, charts.", vague: "Helps with tabular files." },
+  { name: "docx", kw: ["word", "docx", "document", "letter", "memo", "template"], good: "Create and edit Word documents (.docx): memos, letters, templates, tracked changes.", vague: "Helps with documents." },
+  { name: "pdf", kw: ["pdf", "merge", "split", "extract", "pages", "form"], good: "Read, merge, split and fill PDF files; extract text and pages.", vague: "Works with files." },
+  { name: "git-release", kw: ["release", "tag", "changelog", "version", "publish", "semver"], good: "Cut a release: bump the version, write the changelog, tag and publish.", vague: "Helps ship things." },
+  { name: "k8s-debug", kw: ["kubernetes", "pod", "crashloop", "kubectl", "deployment", "restart"], good: "Debug Kubernetes workloads: crashlooping pods, failed deployments, kubectl triage.", vague: "Cluster stuff." },
+  { name: "otel-traces", kw: ["trace", "span", "latency", "slow", "opentelemetry", "request"], good: "Investigate slow requests with OpenTelemetry traces and spans.", vague: "Performance things." },
+  { name: "db-migrate", kw: ["migration", "schema", "database", "column", "table", "alembic"], good: "Write and apply database schema migrations safely, with rollback.", vague: "Database helper." },
+  { name: "security-review", kw: ["security", "vulnerability", "injection", "secrets", "audit", "review"], good: "Security review of a change: injection, secrets, auth, dependency audit.", vague: "Reviews code." },
+  { name: "csv-clean", kw: ["csv", "clean", "dedupe", "malformed", "rows", "encoding"], good: "Clean messy CSV files: bad rows, encodings, duplicates, headers.", vague: "Data helper." },
+  { name: "slack-digest", kw: ["slack", "digest", "channel", "summary", "messages", "weekly"], good: "Summarise Slack channels into a weekly digest.", vague: "Team comms." },
+  { name: "docker-build", kw: ["dockerfile", "image", "build", "layer", "cache", "container"], good: "Write and optimise Dockerfiles: layer order, cache hits, image size.", vague: "Container helper." },
+  { name: "i18n", kw: ["translate", "locale", "translation", "strings", "language", "localisation"], good: "Extract and translate UI strings; manage locale files.", vague: "Language things." }
+];
+const DISTRACT_NAMES = ["jira-triage", "notion-sync", "calendar-plan", "email-draft", "expense-report", "hiring-loop", "okr-review", "incident-postmortem", "api-docs", "changelog-lint", "terraform-plan", "aws-costs", "gcp-iam", "dns-check", "tls-renew", "load-test", "flaky-tests", "coverage-report", "lint-fix", "dep-upgrade", "license-scan", "sbom", "feature-flags", "ab-test", "analytics-dash", "sql-explain", "cache-warm", "queue-drain", "cron-audit", "log-parse", "s3-cleanup", "backup-verify", "oncall-handoff", "runbook", "status-page", "sla-report", "customer-export", "gdpr-delete"];
+const GENERIC = ["file", "report", "format", "convert", "summary", "review", "check", "list", "export", "clean", "template", "notes", "weekly", "customer", "request", "page", "table", "version"];
+
+function makeCatalogue(quality) {
+  const skills = REAL.map((r, i) => ({ ...r, real: true, desc: quality === "vague" ? r.vague : r.good, body: body(r.name, r.kw, i) }));
+  DISTRACT_NAMES.forEach((n, i) => {
+    const h = hashStr(n); const g = [GENERIC[h % GENERIC.length], GENERIC[(h >>>3) % GENERIC.length], GENERIC[(h >>>6) % GENERIC.length]];
+    const desc = `${cap(n.replace(/-/g, " "))}: ${g[0]} and ${g[1]} for the ${g[2]} workflow.`;
+    skills.push({ name: n, kw: g, real: false, desc, body: body(n, g, i + 12, true) });
+  });
+  return skills;
+}
+const cap = s => s.replace(/\b\w/g, c => c.toUpperCase());
+/* a body: procedure text in its own words plus "see also" cross-references
+   to other domains — the thing that makes eager loading confusing */
+function body(name, kw, i, distractor) {
+  const h = hashStr(name);
+  const refs = [0, 1, 2].map(k => REAL[(h >>>(k * 4)) % REAL.length]).filter(r => r.name !== name);
+  const steps = 4 + (h % 6);
+  let t = `# ${name}\n\nWhen to use: tasks about ${kw.join(", ")}.\n\n## Procedure\n`;
+  for (let k = 0; k < steps; k++) t += `${k + 1}. ${cap(kw[k % kw.length])} the ${GENERIC[(h >>>k) % GENERIC.length]} and confirm the ${kw[(k + 1) % kw.length]} is correct before continuing.\n`;
+  /* docs quote the skills they are *not*: exactly what confuses a reader of fifty bodies */
+  t += `\n## Not for\n` + refs.map(r => `- ${r.good} → use the ${r.name} skill instead.`).join("\n");
+  if (distractor) t += `\n\n## Related\n` + refs.map(r => `Often combined with ${r.name} (${r.good.toLowerCase()})`).join("; ") + `. If the ${GENERIC[h % GENERIC.length]} involves ${refs.map(r => r.kw[4] || r.kw[0]).join(", ")}, hand off after this step. Output goes to the ${GENERIC[(h >>> 2) % GENERIC.length]}.`;
+  t += "\n\n" + `Checklist: ${kw.map(k => k + " verified").join("; ")}. `.repeat(2 + (h % 3));
+  return t;
+}
+const TASKS = [
+  { text: "Convert this CSV of quarterly sales into a formatted spreadsheet with totals and a chart", need: "xlsx" },
+  { text: "Cut release 1.4: bump the version, write the changelog, tag and publish", need: "git-release" },
+  { text: "Checkout requests are slow; investigate the traces and find the slow span", need: "otel-traces" },
+  { text: "The payments pod is crashlooping after the deployment; use kubectl to find out why", need: "k8s-debug" },
+  { text: "Draft a memo as a Word document from these notes using our letter template", need: "docx" },
+  { text: "Add a migration for the new column on the orders table with a rollback", need: "db-migrate" },
+  { text: "Review this pull request for injection risks and leaked secrets", need: "security-review" },
+  { text: "Merge these three PDF reports and extract the pages with the totals table", need: "pdf" }
+];
+const CORE = "You are an assistant. Follow the user's instructions, use the skill whose instructions match the task, and say when no skill applies. Never invent a skill.";
+
+/* ============================================================================
+   2. THE "MODEL": keyword overlap over whatever it can see
+   ========================================================================= */
+function pick(task, visible) {
+  const tw = words(task);
+  /* where each skill sits in the prompt, as a fraction of the visible text */
+  const sizes = visible.map(v => tok(v.desc) + (v.body ? tok(v.body) : 0)); const total = sizes.reduce((a, b) => a + b, 0);
+  let off = 0; const pos = sizes.map(sz => { const p = (off + sz / 2) / total; off += sz; return p; });
+  /* "lost in the middle": past ~6k tokens, attention to the middle of the prompt fades */
+  const depth = Math.max(0, Math.min(1, (total - 6000) / 12000));
+  const scored = visible.map((v, i) => { const dw = new Set(words(v.desc)); const bw = v.body ? v.body.toLowerCase() : "";
+    /* a matching word in the one-liner counts double; body mentions count one
+       each, capped at two — repeating a word ten times is not ten times as relevant */
+    let s = 0, hits = []; tw.forEach(w => { if (dw.has(w)) { s += 2; hits.push(w + "×2"); } if (bw) { const c = Math.min(2, (bw.match(new RegExp("\\b" + w, "g")) || []).length); if (c) { s += c; hits.push(w + "×" + c); } } });
+    const wgt = 1 - 0.6 * depth * 4 * pos[i] * (1 - pos[i]);
+    if (wgt < 0.99 && s) hits.push(`position ×${wgt.toFixed(2)}`);
+    return { name: v.name, s: +(s * wgt).toFixed(1), raw: s, hits }; }).sort((a, b) => b.s - a.s || a.name.localeCompare(b.name));
+  return { best: scored[0], runner: scored[1], scored, depth };
+}
+
+/* ============================================================================
+   3. STATE + RUNNING A TASK
+   ========================================================================= */
+function initialState() { return { size: 5, mode: "eager", quality: "good", limit: 32000, last: null, bench: null, curve: null, sel: null }; }
+const clone = s => structuredClone(s);
+function catalogueFor(s, size = s.size) { const all = makeCatalogue(s.quality); return [...all.slice(0, 12), ...all.slice(12)].slice(0, size).sort((a, b) => a.name.localeCompare(b.name)); }
+/* keep every task's needed skill in even the smallest catalogue? No — a small catalogue
+   is a small catalogue. Size 5 = 5 real skills, so tasks 6–8 have no matching skill. */
+function runTask(s, ti, size = s.size, mode = s.mode) {
+  const cat = catalogueFor(s, size), task = TASKS[ti]; const calls = [];
+  const core = tok(CORE), taskT = tok(task.text);
+  const index = cat.map(k => `- ${k.name}: ${k.desc}`).join("\n"), indexT = tok(index);
+  const bodiesT = cat.reduce((a, k) => a + tok(k.body), 0);
+  const hasNeed = cat.some(k => k.name === task.need);
+  if (mode === "eager") {
+    const total = core + bodiesT + taskT;
+    const p = pick(task.text, cat.map(k => ({ name: k.name, desc: k.desc, body: k.body })));
+    const over = total > s.limit;
+    calls.push({ n: 1, parts: [["core", core], ["bodies", bodiesT], ["task", taskT]], total, over, pick: over ? null : p, correct: !over && hasNeed && p.best.name === task.need });
+    return { ti, task, mode, size, calls, sent: over ? 0 : total, correct: !over && hasNeed && p.best.name === task.need, over, hasNeed, picked: over ? null : p.best.name, fetched: [] };
+  }
+  const p1 = pick(task.text, cat.map(k => ({ name: k.name, desc: k.desc })));
+  const t1 = core + indexT + taskT;
+  const chosen = cat.find(k => k.name === p1.best.name);
+  const fetch = p1.best.s > 0 ? chosen : null;
+  calls.push({ n: 1, parts: [["core", core], ["index", indexT], ["task", taskT]], total: t1, over: t1 > s.limit, pick: p1, fetch: fetch ? fetch.name : null });
+  if (!fetch) return { ti, task, mode, size, calls, sent: t1, correct: !hasNeed, over: false, hasNeed, picked: null, fetched: [], noFetch: true };
+  const t2 = t1 + tok(fetch.body);
+  calls.push({ n: 2, parts: [["core", core], ["index", indexT], ["task", taskT], ["fetched", tok(fetch.body)]], total: t2, over: t2 > s.limit, answer: true });
+  return { ti, task, mode, size, calls, sent: t1 + t2, correct: hasNeed && fetch.name === task.need, over: t2 > s.limit, hasNeed, picked: fetch.name, fetched: [fetch.name] };
+}
+function benchmark(s, size = s.size, mode = s.mode) {
+  const rows = TASKS.map((_, i) => runTask(s, i, size, mode));
+  const applicable = rows.filter(r => r.hasNeed);
+  return { rows, sent: rows.reduce((a, r) => a + r.sent, 0), correct: applicable.filter(r => r.correct).length, n: applicable.length, over: rows.filter(r => r.over).length };
+}
+
+/* ============================================================================
+   4. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const fmt = n => n.toLocaleString();
+
+const REGISTRY = {
+  "catalogue": (s, args) => { const n = +args[0]; if (![5, 10, 20, 50].includes(n)) return fail("catalogue 5 | 10 | 20 | 50"); const c = clone(s); c.size = n; c.last = null; c.bench = null;
+    const cat = catalogueFor(c); return { state: c, out: [line(`${n} skills: index ${fmt(tok(cat.map(k => `- ${k.name}: ${k.desc}`).join("\n")))} tokens · full bodies ${fmt(cat.reduce((a, k) => a + tok(k.body), 0))} tokens`, "i")] }; },
+  "mode": (s, args) => { if (!/^(eager|progressive)$/.test(args[0] || "")) return fail("mode eager | progressive"); const c = clone(s); c.mode = args[0]; c.last = null; c.bench = null;
+    return { state: c, out: [line(c.mode === "eager" ? "eager: every skill's full instructions go in every prompt" : "progressive: the index goes in; a body is fetched only when the model asks for it", "i")] }; },
+  "descriptions": (s, args) => { if (!/^(good|vague)$/.test(args[0] || "")) return fail("descriptions good | vague"); const c = clone(s); c.quality = args[0]; c.last = null; c.bench = null; c.curve = null;
+    return { state: c, out: [line(c.quality === "vague" ? "the real skills now have one-liners like \"Helps with documents.\"" : "descriptions restored: specific nouns, the words a task would use", c.quality === "vague" ? "err" : "g")] }; },
+  "limit": (s, args) => { const v = +args[1] || +args[0]; if (!(v >= 1000 && v <= 200000)) return fail("limit tokens N"); const c = clone(s); c.limit = v; c.last = null; c.bench = null; return { state: c, out: [line(`context window ${fmt(v)} tokens`, "dim")] }; },
+  "task": (s, args) => { const i = +args[0] - 1; if (!(i >= 0 && i < TASKS.length)) return fail(`task 1–${TASKS.length}`); const c = clone(s); const r = runTask(c, i); c.last = r; c.sel = r.picked;
+    const out = [line(`task ${i + 1}: "${r.task.text}"`, "t")];
+    r.calls.forEach(cl => { out.push(line(`  call ${cl.n}: ${cl.parts.map(([k, v]) => `${k} ${fmt(v)}`).join(" + ")} = ${fmt(cl.total)} tokens${cl.over ? " — OVER THE WINDOW, refused" : ""}`, cl.over ? "err" : "ok"));
+      if (cl.pick && !cl.over) out.push(line(`  model picks ${cl.pick.best.name} (score ${cl.pick.best.s}: ${cl.pick.best.hits.join(", ") || "nothing"})${cl.pick.runner ? ` · runner-up ${cl.pick.runner.name} (${cl.pick.runner.s})` : ""}`, "b"));
+      if (cl.fetch) out.push(line(`  → fetches the ${cl.fetch} body (${fmt(tok(catalogueFor(c).find(k => k.name === cl.fetch).body))} tokens) and calls again`, "b")); });
+    if (r.noFetch) out.push(line(r.hasNeed ? `  nothing in the index matched — the model gives up although ${r.task.need} exists` : "  nothing matched, and nothing should have: the needed skill isn't in this catalogue", r.hasNeed ? "err" : "dim"));
+    else if (!r.over) out.push(line(r.correct ? `  ✓ ${r.task.need} was the right skill` : r.hasNeed ? `  ✗ needed ${r.task.need}` : `  the needed skill (${r.task.need}) isn't in a ${r.size}-skill catalogue`, r.correct ? "g" : r.hasNeed ? "err" : "dim"));
+    out.push(line(`  tokens sent: ${fmt(r.sent)}`, "dim"));
+    return { state: c, out }; },
+  "bench": s => { const c = clone(s); c.bench = benchmark(c); c.last = null;
+    return { state: c, out: [line(`${c.mode} · ${c.size} skills · ${c.quality} descriptions: ${c.bench.correct}/${c.bench.n} correct on tasks whose skill exists · ${fmt(c.bench.sent)} tokens sent${c.bench.over ? ` · ${c.bench.over} prompt(s) over the window` : ""}`, c.bench.correct === c.bench.n ? "g" : "err")] }; },
+  "curve": s => { const c = clone(s); const sizes = [5, 10, 20, 50];
+    c.curve = sizes.map(sz => ({ size: sz, eager: benchmark(c, sz, "eager"), prog: benchmark(c, sz, "progressive") }));
+    return { state: c, out: [line("size   eager tokens/task  acc    progressive tokens/task  acc", "dim"), ...c.curve.map(r => line(`${String(r.size).padStart(4)}   ${fmt(Math.round(r.eager.sent / 8)).padStart(12)}   ${r.eager.correct}/${r.eager.n}${r.eager.over ? "*" : " "}   ${fmt(Math.round(r.prog.sent / 8)).padStart(14)}   ${r.prog.correct}/${r.prog.n}`, "ok")), line("* some prompts exceeded the window and were refused", "dim")] }; },
+  "show": (s, args) => { const k = catalogueFor(s, 50).find(x => x.name === args[0]); if (!k) return fail("show <skill name>"); const c = clone(s); c.sel = k.name;
+    return { state: c, out: [line(`${k.name} · desc ${tok(k.desc)} tokens · body ${tok(k.body)} tokens`, "i"), line(`  ${k.desc}`, "ok"), ...k.body.split("\n").slice(0, 6).map(l => line("  " + l, "dim")), line("  …", "dim")] }; },
+  "help": () => ({ out: [
+    line("catalogue 5|10|20|50          how many skills exist", "i"),
+    line("mode eager|progressive       full bodies in every prompt, or index + fetch", "i"),
+    line("task N · bench               run one task / all eight", "t"),
+    line("curve                        cost and accuracy across catalogue sizes", "ok"),
+    line("descriptions good|vague      the one-liners the index is made of", "b"),
+    line("limit tokens N · show <skill> · restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase(); if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1).map(x => x.toLowerCase()), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   5. RENDERER
+   ========================================================================= */
+const esc = t => t.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+function render(s) {
+  const cat = catalogueFor(s); const L = s.last;
+  d3.select("#knobs").html([5, 10, 20, 50].map(n => `<button class="k${s.size === n ? " on" : ""}" data-c="catalogue ${n}">${n}</button>`).join("") + `<span class="l"></span>` + ["eager", "progressive"].map(m => `<button class="k${s.mode === m ? (m === "eager" ? " on warn" : " on") : ""}" data-c="mode ${m}">${m}</button>`).join("") + `<span class="l"></span>` + ["good", "vague"].map(q => `<button class="k${s.quality === q ? (q === "vague" ? " on warn" : " on") : ""}" data-c="descriptions ${q}">${q}</button>`).join(""));
+  d3.selectAll("#knobs .k").on("click", function () { run(this.dataset.c); });
+  const indexT = tok(cat.map(k => `- ${k.name}: ${k.desc}`).join("\n")), bodiesT = cat.reduce((a, k) => a + tok(k.body), 0);
+  d3.select("#catst").text(`${cat.length} skills`);
+  d3.select("#cat").html(cat.map(k => { const need = L && L.task.need === k.name; const picked = L && L.picked === k.name; const fetched = L && L.fetched.includes(k.name);
+    return `<div class="sk ${s.mode === "eager" ? "full" : fetched ? "fetched" : "indexed"}${need ? " need" : ""}${picked ? (L.correct ? " picked good" : " picked bad") : ""}" data-n="${k.name}"><span class="n">${k.name}${need ? " ← needed" : ""}${picked && !L.correct ? " ← picked" : ""}</span><span class="t">${s.mode === "eager" ? tok(k.body) + "t loaded" : fetched ? tok(k.body) + "t fetched" : tok(k.desc) + "t"}</span><span class="d">${esc(k.desc)}</span></div>`; }).join(""));
+  d3.selectAll("#cat .sk").on("click", function () { run(`show ${this.dataset.n}`); });
+  d3.select("#tiers").html(`<span><b class="core">core</b> ${tok(CORE)}t always</span><span><b class="index">index</b> ${fmt(indexT)}t ${s.mode === "progressive" ? "in every prompt" : "unused"}</span><span><b class="body">bodies</b> ${fmt(bodiesT)}t ${s.mode === "eager" ? "in every prompt" : "fetched on demand"}</span>`);
+
+  /* prompt blocks */
+  const cv = d3.select("#ctxv");
+  if (!L) { cv.html(`<div class="none">run a task to see what the model was sent</div>`); d3.select("#ctxst").text(""); }
+  else {
+    const scale = Math.max(s.limit, ...L.calls.map(c => c.total)) * 1.05;
+    cv.html(L.calls.map(c => `<div class="call"><div class="h"><span>call ${c.n} · ${c.answer ? "answer" : c.fetch ? "asks to fetch <b>" + c.fetch + "</b>" : c.over ? "<b>refused: over the window</b>" : "answer (or a wrong pick)"}</span><span><b>${fmt(c.total)}</b> tokens</span></div>
+      <div class="bar${c.over ? " over" : ""}">${c.parts.map(([k, v]) => `<i class="${k}" style="width:${v / scale * 100}%" title="${k}: ${v} tokens"><span>${k} ${fmt(v)}</span></i>`).join("")}<div class="lim" style="left:${s.limit / scale * 100}%"></div></div>
+      ${c.pick && !c.over ? `<div class="pick">picks <span class="${c.pick.best.name === L.task.need ? "g" : "b"}">${c.pick.best.name}</span> <span class="sc">score ${c.pick.best.s} (${c.pick.best.hits.slice(0, 5).join(", ") || "no matches"})</span>${c.pick.runner ? ` · runner-up ${c.pick.runner.name} <span class="sc">${c.pick.runner.s}</span>` : ""}${L.hasNeed && c.pick.best.name !== L.task.need ? ` · needed <span class="g">${L.task.need}</span> <span class="sc">${(c.pick.scored.find(x => x.name === L.task.need) || { s: "absent" }).s}</span>` : ""}</div>` : ""}</div>`).join("") + `<div class="pick" style="margin-top:2px">${L.over ? "the prompt did not fit; nothing was answered" : L.noFetch ? (L.hasNeed ? "no fetch: the index gave the model nothing to go on" : "no skill applies, and the model correctly said so") : L.correct ? "✓ right skill" : L.hasNeed ? "✗ wrong skill" : "needed skill not in catalogue"} · <b>${fmt(L.sent)}</b> tokens sent in total</div>`);
+    d3.select("#ctxst").text(`task ${L.ti + 1} · ${L.mode} · ${L.size} skills`);
+  }
+  /* bench */
+  const B = s.bench, bv = d3.select("#bench");
+  if (!B) { bv.html(`<div class="none">bench runs all eight tasks with the current settings</div>`); d3.select("#benchst").text(""); }
+  else { bv.html(`<table><thead><tr><th>task</th><th>needs</th><th>picked</th><th style="text-align:right">tokens</th></tr></thead><tbody>${B.rows.map(r => `<tr><td>${r.ti + 1}</td><td>${r.hasNeed ? r.task.need : `<span style="color:var(--ink-faint)">${r.task.need} (absent)</span>`}</td><td class="${r.over ? "bad" : r.correct ? "ok" : r.hasNeed ? "bad" : ""}">${r.over ? "refused" : r.picked || "—"}</td><td class="n">${fmt(r.sent)}</td></tr>`).join("")}</tbody></table><div class="tot"><span class="a ${B.correct === B.n ? "good" : "bad"}">${B.correct}/${B.n} correct</span><span>${fmt(B.sent)} tokens</span></div>`); d3.select("#benchst").text(`${s.mode} · ${s.size} · ${s.quality}`); }
+  /* curve */
+  const C = s.curve, cvv = d3.select("#curve");
+  if (!C) { cvv.html(`<div class="none">curve computes both modes at 5, 10, 20 and 50 skills</div>`); d3.select("#cnote").text(""); }
+  else {
+    const W = 300, H = 170, l = 40, r = 30, t = 12, b = 22; const xs = d3.scalePoint().domain(C.map(c => c.size)).range([l, W - r]);
+    const maxT = Math.max(...C.flatMap(c => [c.eager.sent, c.prog.sent])) / 8; const ys = d3.scaleLinear().domain([0, maxT]).range([H - b, t]); const ya = d3.scaleLinear().domain([0, 1]).range([H - b, t]);
+    const P = (key, y) => d3.line().x(c => xs(c.size)).y(c => y(c[key]))(C.map(c => ({ size: c.size, e: c.eager.sent / 8, p: c.prog.sent / 8, ea: c.eager.n ? c.eager.correct / c.eager.n : 0, pa: c.prog.n ? c.prog.correct / c.prog.n : 0 })));
+    cvv.html(`<svg viewBox="0 0 ${W} ${H}"><line class="ax" x1="${l}" x2="${W - r}" y1="${H - b}" y2="${H - b}"/><line class="ax" x1="${l}" x2="${l}" y1="${t}" y2="${H - b}"/>
+      <path class="e" d="${P("e", ys)}"/><path class="p" d="${P("p", ys)}"/><path class="ea" d="${P("ea", ya)}"/><path class="pa" d="${P("pa", ya)}"/>
+      ${C.map(c => `<text x="${xs(c.size)}" y="${H - 8}" text-anchor="middle">${c.size}</text>`).join("")}<text x="${l - 4}" y="${t + 4}" text-anchor="end">${fmt(Math.round(maxT / 1000))}k</text><text x="${l - 4}" y="${H - b}" text-anchor="end">0</text><text x="${W - r + 3}" y="${t + 4}">100%</text><text x="${W - r + 3}" y="${H - b}">0%</text>
+      <text x="${l + 4}" y="${t + 4}" fill="#e8a33d">eager</text><text x="${l + 44}" y="${t + 4}" fill="#b08be8">progressive</text></svg>`);
+    const last = C[C.length - 1];
+    d3.select("#cnote").text(`at 50 skills (${s.quality} descriptions): eager ${fmt(Math.round(last.eager.sent / 8))} tokens/task, ${last.eager.correct}/${last.eager.n} right${last.eager.over ? " (some refused)" : ""} · progressive ${fmt(Math.round(last.prog.sent / 8))} tokens/task, ${last.prog.correct}/${last.prog.n} right`);
+  }
+}
+
+/* ============================================================================
+   6. LESSON
+   ========================================================================= */
+const LESSON = [
+  { title: "Five skills, load them all",
+    body: `A small catalogue and the simplest possible runtime: every skill's full instructions
+    are pasted into every prompt. Run a task. One call, the model reads five manuals, picks the
+    right one. The prompt is a few thousand tokens. Nothing wrong with this — yet.`,
+    try: "task 1", expect: /^task 1$/,
+    needs: s => s.size === 5 && s.mode === "eager" && s.quality === "good" && !s.last },
+
+  { title: "Fifty skills",
+    body: `The catalogue grows the way catalogues do: someone adds a skill for every workflow.
+    Look at the tiers under the list: the bodies now add up to more than twenty thousand tokens.`,
+    try: "catalogue 50", expect: /^catalogue 50$/,
+    needs: s => s.size !== 50 && s.mode === "eager" },
+
+  { title: "…the same task",
+    body: `Eighteen thousand tokens for a one-line task, and read the pick. Two things go wrong
+    in a prompt this long. Other skills' manuals quote the spreadsheet skill's description —
+    "not for spreadsheets, see xlsx" — so its words appear all over the catalogue. And the
+    model's attention to the middle of a long prompt fades, so a skill buried mid-catalogue
+    loses to a quoter near the ends. This task may survive; run the benchmark to see how many
+    don't.`,
+    try: "task 1", expect: /^task 1$/,
+    needs: s => s.size === 50 && s.mode === "eager" && (!s.last || s.last.size !== 50) },
+
+  { title: "Measure it",
+    body: `All eight tasks. Read the accuracy and the total. This is the "context rot" that
+    shows up when a tool list gets long: not a hard limit, a slow slide into confusion, paid
+    for at full price every call.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.size === 50 && s.mode === "eager" && !s.bench },
+
+  { title: "Progressive disclosure",
+    body: `Switch the runtime. Now the prompt carries one line per skill — name and
+    description — and nothing else. When the model wants a skill it asks for it by name, the
+    runtime appends that one body, and the model is called again.`,
+    try: "mode progressive", expect: /^mode progressive$/,
+    needs: s => s.mode === "eager" && s.size === 50 },
+
+  { title: "…the same task",
+    body: `Two calls now. The first sees the index — under a thousand tokens — and picks xlsx,
+    because the only text competing for the match is fifty one-liners, and the right one-liner
+    uses the task's own words. The second call has the xlsx body and answers. Total: a tenth
+    of the eager cost, and correct.`,
+    try: "task 1", expect: /^task 1$/,
+    needs: s => s.mode === "progressive" && s.size === 50 && (!s.last || s.last.mode !== "progressive") },
+
+  { title: "…measure it",
+    body: `Eight for eight, at a fraction of the tokens. The extra round trip is the price;
+    the index staying small is the prize.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.mode === "progressive" && s.size === 50 && (!s.bench || s.bench.rows[0].mode !== "progressive") },
+
+  { title: "The whole curve",
+    body: `Both modes at every catalogue size. Eager cost grows with the catalogue and its
+    accuracy falls; progressive cost is flat and its accuracy holds. The crossover is early.
+    This is the shape behind MCP's tool discovery, skill indexes, and every "load on demand"
+    design in agent runtimes.`,
+    try: "curve", expect: /^curve$/,
+    needs: s => !s.curve && s.quality === "good" },
+
+  { title: "The catch: the one-liners carry everything",
+    body: `Progressive disclosure moved the model's decision from fifty manuals to fifty
+    sentences. Make those sentences vague — "Helps with documents." — and see what happens.`,
+    try: "descriptions vague", expect: /^descriptions vague$/,
+    needs: s => s.quality === "good" && s.mode === "progressive" },
+
+  { title: "…measure it",
+    body: `The index no longer contains the words a task would use, so the match goes to a
+    distractor or to nothing at all. Accuracy collapses without a single body being wrong. A
+    description is not documentation; it is the retrieval key, and it should be written from
+    the task's side: the nouns a user would type.`,
+    try: "bench", expect: /^bench$/,
+    needs: s => s.quality === "vague" && s.mode === "progressive" && (!s.bench || s.bench.rows[0].correct) },
+
+  { title: "Fix the descriptions",
+    body: `Back to specific one-liners.`,
+    try: "descriptions good", expect: /^descriptions good$/,
+    needs: s => s.quality === "vague" },
+
+  { title: "A smaller window",
+    body: `One more thing eager loading can't survive: a model with an eight-thousand-token
+    window. Set the limit, switch to eager, and run a task.`,
+    try: "limit tokens 8000", expect: /^limit tokens 8000$/,
+    needs: s => s.limit !== 8000 && s.quality === "good" },
+
+  { title: "…eager",
+    body: `Full bodies again.`,
+    try: "mode eager", expect: /^mode eager$/,
+    needs: s => s.limit === 8000 && s.mode !== "eager" },
+
+  { title: "…refused",
+    body: `The prompt doesn't fit. Not a bad answer — no answer. The runtime can't even make
+    the call. Progressive disclosure isn't only cheaper; past a certain catalogue size it is
+    the only thing that works at all.`,
+    try: "task 1", expect: /^task 1$/,
+    needs: s => s.limit === 8000 && s.mode === "eager" && s.size === 50 && (!s.last || !s.last.over) },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>catalogue 5</code> with <code>task 6</code>
+    (the needed skill doesn't exist — does the model admit it?), <code>show jira-triage</code>
+    to read a distractor's cross-references, or vague descriptions in eager mode, where the
+    bodies can still rescue the pick.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   7. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Context engineering sandbox loaded. Type 'help', or: task 1", "dim");
+</script>
+</body>
+</html>
