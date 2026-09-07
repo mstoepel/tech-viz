@@ -2,7 +2,7 @@
 
 Interactive, self-contained HTML sandboxes that teach technical concepts by letting the
 reader type commands and watch a model move. Served by GitHub Pages from `main` at the
-repo root: https://mstoepel.github.io/tech-viz/. Sixteen pages so far across git, Docker,
+repo root: https://mstoepel.github.io/tech-viz/. Nineteen pages so far across git, Docker,
 Kubernetes, databases, observability, AI systems and Spark.
 
 ## Repo shape
@@ -97,6 +97,19 @@ use `location.reload()`.
   step needed a sane partition count first, and the disclosure page needed two real
   mechanisms (docs quoting other skills, lost-in-the-middle attention) before eager
   loading degraded.
+- A Try command that is a no-op in the state the previous step left behind — `step` after
+  a simulation already finished, a `q N` when that question is already selected. Where it
+  makes sense, have the command restart rather than refuse (inference-serving's `step`
+  reruns a finished sim).
+- **Verify the direction of a textbook effect in your toy before writing it down.** Three
+  claims failed this session: retrieval answer spans straddled chunk-2 boundaries so
+  "bigger chunks fix splits" was false and reranking looked broken; a paged KV allocator
+  without an admission watermark thrashed and lost to naive reservation, the opposite of
+  reality; and end-to-end latency *falls* with batch size for a burst workload, so the
+  throughput/latency tradeoff had to be shown as time-per-output-token instead. Toy
+  parameters (document length, workload size, budget) usually decide whether the real
+  effect is even visible — a corpus of five-sentence documents cannot demonstrate that
+  chunking matters.
 
 ## What exists
 
@@ -107,13 +120,12 @@ use `location.reload()`.
 | k8s | reconciliation |
 | db | transactions |
 | otel | traces |
-| ai | agent-loop, transformer, diffusion, post-training, coding-agent, progressive-disclosure |
+| ai | agent-loop, transformer, diffusion, post-training, coding-agent, progressive-disclosure, tokens-sampling, retrieval, inference-serving |
 | spark | lazy-plans, shuffle |
 
-Candidates discussed and not built: tokens and sampling, retrieval in embedding space,
-inference serving (batching, KV cache paging), DNS resolution, TLS handshake, B-tree
-indexes, consistent hashing, git object store, mixture of experts, multi-agent handoffs,
-evals with graders.
+Candidates discussed and not built: DNS resolution, TLS handshake, B-tree indexes,
+consistent hashing, git object store, mixture of experts, multi-agent handoffs, evals with
+graders.
 
 ## Building a new page: checklist
 
