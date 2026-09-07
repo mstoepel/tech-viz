@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pieces and dice — a tokens and sampling sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Token chips alternate two hues so boundaries are the visible thing. In the
+   distribution, raw probability is a faint marker, the reshaped probability
+   is the purple bar, truncated candidates are struck, the sampled one is
+   amber.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --t1:#5cc8d6; --t2:#b08be8; --p:#b08be8; --pick:#e8a33d; --cut:#e06c6c; --ok:#6fbf73; --letter:#e07aa8;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--pick)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--p);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--p);color:var(--p)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--p);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: text shattering into chips as the merge count moves; and a
+   bar chart of the next token that the three knobs reshape before a die is
+   thrown at it.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.stage{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}
+.ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line);font-family:var(--code);font-size:10.5px;color:var(--ink-faint)}
+.ctl input[type=range]{flex:1;min-width:90px;accent-color:var(--p)}
+.ctl b{color:var(--ink);font-weight:400;min-width:3em}
+.ctl button{padding:2px 8px;font-size:10.5px}
+.ctl button.on{border-color:var(--p);color:var(--p)}
+.chips{padding:10px 12px;display:flex;flex-wrap:wrap;gap:4px;min-height:44px;align-content:flex-start}
+.chip{font-family:var(--code);font-size:12px;padding:3px 6px;border-radius:3px;border:1px solid;white-space:pre;position:relative}
+.chip.a{border-color:var(--t1);color:var(--t1);background:rgba(92,200,214,.08)} .chip.b{border-color:var(--t2);color:var(--t2);background:rgba(176,139,232,.08)}
+.chip .id{position:absolute;top:-8px;right:-2px;font-size:8px;color:var(--ink-faint);background:var(--panel);padding:0 2px}
+.chip .l{color:var(--letter);font-weight:700;text-decoration:underline}
+.chip.new{border-color:var(--pick);color:var(--pick);background:rgba(232,163,61,.1)}
+.chip.sp{opacity:.9}
+.tstat{padding:0 12px 8px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);display:flex;gap:12px;flex-wrap:wrap}
+.tstat b{color:var(--ink);font-weight:400}
+.merges{border-top:1px solid var(--line);padding:8px 12px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);max-height:180px;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:2px 8px}
+.merges .m{white-space:nowrap} .merges .m i{color:var(--ink-faint);font-style:normal} .merges .m.on{color:var(--ink)} .merges .m.off{color:var(--ink-faint);opacity:.5}
+.merges .m b{color:var(--pick);font-weight:400}
+.letters{padding:8px 12px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line);line-height:1.6}
+.letters b{color:var(--letter);font-weight:400}
+.dist{padding:8px 12px 4px}
+.row{display:grid;grid-template-columns:86px 1fr 52px;gap:8px;align-items:center;font-family:var(--code);font-size:11px;padding:2px 0}
+.row .tk{color:var(--ink);white-space:pre;overflow:hidden;text-overflow:ellipsis;border:1px solid var(--line);border-radius:3px;padding:1px 5px;text-align:center}
+.row .bar{position:relative;height:12px;background:var(--panel-2);border-radius:2px}
+.row .bar i{position:absolute;left:0;top:0;height:100%;background:var(--p);border-radius:2px;transition:width .3s}
+.row .bar b{position:absolute;top:-2px;width:2px;height:16px;background:var(--ink-faint)}
+.row .bar em{position:absolute;top:-2px;width:1px;height:16px;background:var(--cut)}
+.row .n{text-align:right;color:var(--ink-dim)}
+.row.cut .tk{color:var(--ink-faint);text-decoration:line-through;border-style:dashed} .row.cut .bar i{background:var(--cut);opacity:.35} .row.cut .n{color:var(--ink-faint)}
+.row.picked .tk{border-color:var(--pick);color:var(--pick);background:rgba(232,163,61,.1)} .row.picked .bar i{background:var(--pick)}
+.row.rest .tk{border:none;color:var(--ink-faint);text-align:left}
+.dist .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.dstat{padding:6px 12px 8px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);display:flex;gap:12px;flex-wrap:wrap;border-top:1px solid var(--line)}
+.dstat b{color:var(--ink);font-weight:400} .dstat b.warn{color:var(--pick)}
+.gen{padding:8px 12px 10px;font-family:var(--code);font-size:12px;line-height:1.9;border-top:1px solid var(--line);min-height:40px}
+.gen .pr{color:var(--ink-dim)} .gen .g{color:var(--ink);border-bottom:1px solid var(--p)} .gen .g.last{color:var(--pick);border-color:var(--pick)}
+.gen .hint{color:var(--ink-faint);font-size:10.5px}
+.pipe{padding:6px 12px 8px;font-family:var(--code);font-size:10px;color:var(--ink-faint);border-top:1px solid var(--line);line-height:1.6}
+.pipe b{color:var(--ink-dim);font-weight:400}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--p)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .a{color:var(--t1)} .log .m{color:var(--p)} .log .k{color:var(--pick)} .log .err{color:var(--cut)} .log .g{color:var(--ok)} .log .l{color:var(--letter)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--p)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:760px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 07 · AI systems</p>
+  <h1>The model reads in <em>pieces</em> and writes by throwing dice</h1>
+  <p class="standfirst">Two things happen at the edges of every language model that nobody
+  sees. On the way in, text is chopped into pieces by a tokenizer that was built from letter
+  frequencies, not meaning. On the way out, the model produces a probability for every piece
+  in its vocabulary, and a sampler reshapes that distribution and rolls. Both halves here are
+  real: a byte-pair tokenizer trained in front of you, and a small language model behind the
+  bars.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>Tokenizer · byte-pair encoding</span><span class="st" id="tokst"></span></div>
+      <div class="ctl"><span>merges</span><input type="range" id="mslider" min="0" max="200" step="1"><b id="mval"></b></div>
+      <div class="chips" id="chips"></div>
+      <div class="tstat" id="tstat"></div>
+      <div class="letters" id="letters"></div>
+      <div class="merges" id="merges"></div>
+    </div>
+    <div class="box">
+      <div class="cap"><span>Next token · P(piece | context)</span><span class="st" id="dst"></span></div>
+      <div class="ctl"><span>T</span><input type="range" id="tslider" min="0" max="3" step="0.1"><b id="tval"></b><span>top-k</span><input type="range" id="kslider" min="0" max="20" step="1"><b id="kval"></b><span>top-p</span><input type="range" id="pslider" min="0.1" max="1" step="0.05"><b id="pval"></b></div>
+      <div class="ctl"><button id="sbtn">sample</button><button id="gbtn">generate 10</button><button id="ubtn">undo</button><span class="st" id="cst"></span></div>
+      <div class="dist" id="dist"></div>
+      <div class="dstat" id="dstat"></div>
+      <div class="gen" id="gen"></div>
+      <div class="pipe" id="pipe"></div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="text the cat sat on the mat">
+    </div>
+  </div>
+  <p class="hintbar"><code>text strawberry</code> · <code>merges 40</code> · <code>letters r</code> · <code>prompt the cat sat on the</code> ·
+  <code>temp 0.3</code> · <code>topk 3</code> · <code>topp 0.9</code> · <code>sample</code> · <code>generate 12</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. The tokenizer is real
+    byte-pair encoding trained on the 230-word corpus in the source: start from characters
+    (with a ▁ marking a word start), merge the most frequent adjacent pair, repeat; the slider
+    replays the merges in the order they were learned. The language model is a trigram model
+    with backoff over those tokens — a genuine probability distribution over the vocabulary,
+    just a very small and very local one. Temperature, top-k and top-p are applied exactly as
+    a real sampler applies them: divide log-probabilities by T, softmax, truncate, renormalise,
+    draw. Token ids are vocabulary indices; real vocabularies are ~100k pieces, not ~200.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. THE CORPUS AND THE TOKENIZER (real BPE)
+   ========================================================================= */
+const CORPUS = `the cat sat on the mat . the dog sat on the log . the cat saw the dog and the dog saw the cat .
+the sun set over the sea and the sea was still . the cat sat on the mat again and the dog ran to the sea .
+the little bird sang in the tree and the cat looked up at the bird . the dog looked at the cat and the cat looked at the dog .
+on the mat the cat slept . in the tree the bird slept . by the sea the dog slept and the sun set .
+the cat sat on the mat and the dog sat on the log and the bird sat in the tree . that is the end of the story .
+the cat ran and the dog ran and the bird sang . the sea was cold and the sun was warm and the mat was soft .
+the cat sat on the warm mat . the dog sat on the cold log . the little cat and the little dog sat together by the sea .
+the story of the cat and the dog is a little story . the end .`;
+
+const MAX_MERGES = 200;
+function trainBPE(corpus, maxMerges) {
+  const freq = {}; corpus.trim().split(/\s+/).forEach(w => { freq[w] = (freq[w] || 0) + 1; });
+  let words = Object.entries(freq).map(([w, f]) => ({ syms: ["▁", ...w.split("")], f }));
+  const merges = [];
+  for (let i = 0; i < maxMerges; i++) {
+    const pairs = new Map();
+    words.forEach(({ syms, f }) => { for (let j = 0; j < syms.length - 1; j++) { const k = syms[j] + " " + syms[j + 1]; pairs.set(k, (pairs.get(k) || 0) + f); } });
+    if (!pairs.size) break;
+    let best = null, bestN = 0; [...pairs.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 1).forEach(([k, n]) => { best = k; bestN = n; });
+    if (bestN < 2) break;
+    const [a, b] = best.split(" "); merges.push({ a, b, ab: a + b, n: bestN });
+    words = words.map(({ syms, f }) => ({ syms: mergeOnce(syms, a, b), f }));
+  }
+  return merges;
+}
+function mergeOnce(syms, a, b) { const out = []; for (let j = 0; j < syms.length; j++) { if (syms[j] === a && syms[j + 1] === b) { out.push(a + b); j++; } else out.push(syms[j]); } return out; }
+const MERGES = trainBPE(CORPUS, MAX_MERGES);
+const CHARS = [...new Set(("▁" + CORPUS.replace(/\s+/g, "")).split(""))].sort();
+function vocabAt(n) { return [...CHARS, ...MERGES.slice(0, n).map(m => m.ab)]; }
+function tokenize(text, n) {
+  const ws = text.trim().split(/\s+/).filter(Boolean); const out = [];
+  ws.forEach(w => { let syms = ["▁", ...w.split("")]; for (let i = 0; i < n; i++) syms = mergeOnce(syms, MERGES[i].a, MERGES[i].b); out.push(...syms); });
+  return out;
+}
+
+/* ============================================================================
+   2. THE LANGUAGE MODEL (trigram with backoff over the tokens)
+   ========================================================================= */
+const lmCache = {};
+function lm(n) {
+  if (lmCache[n]) return lmCache[n];
+  const toks = tokenize(CORPUS.replace(/\n/g, " "), n); const V = vocabAt(n); const idx = new Map(V.map((t, i) => [t, i]));
+  const uni = new Float64Array(V.length), bi = new Map(), tri = new Map();
+  toks.forEach((t, i) => { uni[idx.get(t)]++; if (i > 0) { const k = toks[i - 1]; if (!bi.has(k)) bi.set(k, new Map()); bi.get(k).set(t, (bi.get(k).get(t) || 0) + 1); }
+    if (i > 1) { const k = toks[i - 2] + " " + toks[i - 1]; if (!tri.has(k)) tri.set(k, new Map()); tri.get(k).set(t, (tri.get(k).get(t) || 0) + 1); } });
+  const total = toks.length;
+  const dist = ctx => { const out = new Float64Array(V.length); const c2 = ctx.slice(-2);
+    const pu = new Float64Array(V.length); for (let i = 0; i < V.length; i++) pu[i] = (uni[i] + 0.05) / (total + 0.05 * V.length);
+    const b = bi.get(c2[c2.length - 1]); const t = c2.length === 2 ? tri.get(c2.join(" ")) : null;
+    const bt = b ? [...b.values()].reduce((x, y) => x + y, 0) : 0, tt = t ? [...t.values()].reduce((x, y) => x + y, 0) : 0;
+    for (let i = 0; i < V.length; i++) { const pb = b ? ((b.get(V[i]) || 0) / bt) : pu[i]; const pt = t ? ((t.get(V[i]) || 0) / tt) : pb; out[i] = 0.55 * pt + 0.3 * pb + 0.15 * pu[i]; }
+    return out; };
+  return lmCache[n] = { V, dist, toks };
+}
+
+/* ============================================================================
+   3. THE SAMPLER — exactly as a real one
+   ========================================================================= */
+function reshape(p, T, topk, topp) {
+  const n = p.length; const order = [...p.keys()].sort((a, b) => p[b] - p[a]);
+  let q = new Float64Array(n);
+  if (T === 0) { q[order[0]] = 1; return { q, order, alive: 1, greedy: true }; }
+  const lz = order.map(i => Math.log(Math.max(p[i], 1e-12)) / T); const m = Math.max(...lz); const ez = lz.map(v => Math.exp(v - m)); const Z = ez.reduce((a, b) => a + b, 0);
+  order.forEach((i, r) => q[i] = ez[r] / Z);
+  let alive = n;
+  if (topk > 0) { alive = Math.min(alive, topk); }
+  if (topp < 1) { let cum = 0, k = 0; for (; k < n; k++) { cum += q[order[k]]; if (cum >= topp) { k++; break; } } alive = Math.min(alive, k); }
+  const keep = new Set(order.slice(0, alive)); let Z2 = 0; for (const i of keep) Z2 += q[i];
+  const q2 = new Float64Array(n); for (const i of keep) q2[i] = q[i] / Z2;
+  return { q: q2, qT: q, order, alive, greedy: false };
+}
+function rng(seed) { let s = (seed >>> 0) || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
+const entropy = q => { let h = 0; for (const v of q) if (v > 1e-12) h -= v * Math.log2(v); return h; };
+
+/* ============================================================================
+   4. STATE + COMMANDS
+   ========================================================================= */
+function initialState() { return { text: "the cat sat on the mat", merges: 0, letter: null, prompt: "the sun set over the", gen: [], temp: 1, topk: 0, topp: 1, seed: 7, draws: 0, last: null }; }
+const clone = s => structuredClone(s);
+const ctxTokens = s => [...tokenize(s.prompt, s.merges), ...s.gen];
+function nextDist(s) { const M = lm(s.merges); const p = M.dist(ctxTokens(s)); const r = reshape(p, s.temp, s.topk, s.topp); return { M, p, ...r }; }
+function draw(s) {
+  const d = nextDist(s); const r = rng(s.seed * 7919 + s.draws * 104729); const u = r();
+  let acc = 0, pick = d.order[0]; for (const i of d.order) { acc += d.q[i]; if (u <= acc) { pick = i; break; } }
+  s.gen.push(d.M.V[pick]); s.draws++; s.last = { pick, u };
+  return { tok: d.M.V[pick], p: d.q[pick], raw: d.p[pick], alive: d.alive, u };
+}
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const show = t => t.replace(/▁/g, "␣");
+
+const REGISTRY = {
+  "text": (s, args, raw) => { const t = raw.trim().replace(/^text\s*/i, ""); if (!t) return fail("text <words>"); const n = clone(s); n.text = t; n.letter = null;
+    const tk = tokenize(t, n.merges); return { state: n, out: [line(`${tk.length} token(s) at ${n.merges} merges: ${tk.map(show).join(" | ")}`, "a")] }; },
+  "merges": (s, args) => { const n0 = +args[0]; if (!(n0 >= 0 && n0 <= MERGES.length)) return fail(`merges 0–${MERGES.length}`); const n = clone(s); n.merges = n0;
+    const tk = tokenize(n.text, n0); return { state: n, out: [line(`${n0} merges · vocabulary ${vocabAt(n0).length} · "${n.text}" → ${tk.length} token(s): ${tk.map(show).join(" | ")}`, "a"),
+      line(n0 ? `latest merge: ${show(MERGES[n0 - 1].a)} + ${show(MERGES[n0 - 1].b)} → ${show(MERGES[n0 - 1].ab)} (seen ${MERGES[n0 - 1].n}× in the corpus)` : "no merges: every character is its own token", "dim")] }; },
+  "letters": (s, args) => { const ch = (args[0] || "").slice(0, 1); if (!ch) return fail("letters <character>"); const n = clone(s); n.letter = ch;
+    const tk = tokenize(n.text, n.merges); const per = tk.map((t, i) => ({ t, c: (t.split(ch).length - 1) })).filter(x => x.c);
+    return { state: n, out: [line(`"${ch}" appears ${tk.join("").split(ch).length - 1} time(s) in the text, inside ${per.length} token(s): ${per.map(x => `${show(x.t)} (×${x.c})`).join(", ") || "none"}`, "l"),
+      line("the model never sees the letters — it sees token ids. To count letters it has to know how each piece is spelled.", "dim")] }; },
+  "prompt": (s, args, raw) => { const t = raw.trim().replace(/^prompt\s*/i, ""); if (!t) return fail("prompt <words>"); const n = clone(s); n.prompt = t; n.gen = []; n.last = null;
+    const d = nextDist(n); const top = d.order.slice(0, 3).map(i => `${show(d.M.V[i])} ${(d.q[i] * 100).toFixed(0)}%`).join(", ");
+    return { state: n, out: [line(`context: ${ctxTokens(n).map(show).join(" ")} → top: ${top}`, "m")] }; },
+  "temp": (s, args) => { const v = parseFloat(args[0]); if (!(v >= 0 && v <= 3)) return fail("temp 0–3 (0 = greedy)"); const n = clone(s); n.temp = v; const d = nextDist(n);
+    return { state: n, out: [line(`T = ${v}: ${v === 0 ? "greedy — always the top piece" : v < 1 ? "sharper: the top piece takes more" : v > 1 ? "flatter: the tail gets a chance" : "the model's own distribution"} · entropy ${entropy(d.q).toFixed(2)} bits`, "k")] }; },
+  "topk": (s, args) => { const v = +args[0]; if (!(v >= 0 && v <= 50)) return fail("topk 0–50 (0 = off)"); const n = clone(s); n.topk = v; return { state: n, out: [line(v ? `top-k ${v}: only the ${v} most likely pieces survive, then renormalise` : "top-k off", "k")] }; },
+  "topp": (s, args) => { const v = parseFloat(args[0]); if (!(v > 0 && v <= 1)) return fail("topp 0.1–1 (1 = off)"); const n = clone(s); n.topp = v; const d = nextDist(n);
+    return { state: n, out: [line(v < 1 ? `top-p ${v}: keep the smallest set of pieces whose mass reaches ${v} — here that's ${d.alive} piece(s)` : "top-p off", "k")] }; },
+  "sample": (s) => { const n = clone(s); const r = draw(n); return { state: n, out: [line(`u = ${r.u.toFixed(3)} → ${show(r.tok)}  (p ${(r.p * 100).toFixed(1)}% after reshaping, ${(r.raw * 100).toFixed(1)}% raw, ${r.alive} alive)`, "k")] }; },
+  "generate": (s, args) => { const k = Math.min(40, Math.max(1, +args[0] || 10)); const n = clone(s); const toks = []; for (let i = 0; i < k; i++) toks.push(draw(n).tok);
+    const txt = toks.join("").replace(/▁/g, " "); const loop = /((?:\S+ ){1,8}\S+)(?: \1){2,}/.test(txt.trim());
+    return { state: n, out: [line(`+${k}: ${txt}`, "g"), ...(loop ? [line("that's a loop — a sharp distribution and a short context feed on themselves", "dim")] : [])] }; },
+  "undo": (s) => { if (!s.gen.length) return { out: [line("nothing generated yet", "dim")] }; const n = clone(s); n.gen.pop(); return { state: n, out: [line("removed the last piece", "dim")] }; },
+  "seed": (s, args) => { const v = +args[0]; if (!(v >= 0)) return fail("seed N"); const n = clone(s); n.seed = v; n.draws = 0; return { state: n, out: [line(`seed ${v}`, "dim")] }; },
+  "help": () => ({ out: [
+    line("text <words> · merges N · letters <ch>     the tokenizer half", "a"),
+    line("prompt <words> · temp X · topk N · topp X  the sampler half", "m"),
+    line("sample · generate N · undo · seed N", "k"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase(); if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   5. RENDERER
+   ========================================================================= */
+const esc = t => t.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+function render(s) {
+  /* tokenizer */
+  const tk = tokenize(s.text, s.merges), V = vocabAt(s.merges), vid = new Map(V.map((t, i) => [t, i]));
+  const prev = s.merges ? tokenize(s.text, s.merges - 1) : null; const newSet = new Set(s.merges ? tk.filter(t => !prev.includes(t)) : []);
+  d3.select("#chips").html(tk.map((t, i) => { const body = s.letter ? esc(t).split(s.letter).join(`<span class="l">${s.letter}</span>`) : esc(t);
+    return `<span class="chip ${i % 2 ? "b" : "a"}${newSet.has(t) && t.length > 1 ? " new" : ""}" title="token id ${vid.get(t)}">${body.replace(/▁/g, "␣")}<span class="id">${vid.get(t)}</span></span>`; }).join(""));
+  const chars = s.text.replace(/\s+/g, "").length;
+  d3.select("#tstat").html(`<span><b>${tk.length}</b> tokens</span><span><b>${chars}</b> letters</span><span><b>${(chars / tk.length).toFixed(1)}</b> letters/token</span><span>vocabulary <b>${V.length}</b></span>`);
+  d3.select("#tokst").text(`${s.merges} of ${MERGES.length} merges`);
+  document.getElementById("mslider").value = s.merges; d3.select("#mval").text(s.merges);
+  const lt = d3.select("#letters");
+  if (!s.letter) lt.html(`<span style="color:var(--ink-faint)">letters &lt;ch&gt; highlights a character across the pieces</span>`);
+  else { const per = tk.map(t => t.split(s.letter).length - 1); lt.html(`"<b>${esc(s.letter)}</b>" appears ${per.reduce((a, b) => a + b, 0)}× · per token: ${tk.map((t, i) => `${show(esc(t))}:${per[i]}`).join("  ")} — the model receives ids ${tk.map(t => vid.get(t)).join(", ")}, not letters`); }
+  d3.select("#merges").html(MERGES.map((m, i) => `<span class="m ${i < s.merges ? "on" : "off"}"><i>${String(i + 1).padStart(3)}</i> ${show(esc(m.a))}+${show(esc(m.b))} → <b>${show(esc(m.ab))}</b></span>`).join(""));
+
+  /* sampler */
+  const d = nextDist(s); const ctx = ctxTokens(s);
+  d3.select("#dst").text(`vocab ${d.M.V.length} · context: ${ctx.slice(-2).map(show).join(" ")}`);
+  document.getElementById("tslider").value = s.temp; d3.select("#tval").text(s.temp.toFixed(1));
+  document.getElementById("kslider").value = s.topk; d3.select("#kval").text(s.topk || "off");
+  document.getElementById("pslider").value = s.topp; d3.select("#pval").text(s.topp >= 1 ? "off" : s.topp.toFixed(2));
+  const N = 12; const maxq = Math.max(d.q[d.order[0]], d.p[d.order[0]], 1e-6);
+  const rows = d.order.slice(0, N).map((i, r) => { const alive = r < d.alive; const picked = s.last && s.last.pick === i && s.gen.length;
+    return `<div class="row${alive ? "" : " cut"}${picked ? " picked" : ""}"><span class="tk" title="id ${i}">${show(esc(d.M.V[i]))}</span><div class="bar"><i style="width:${(alive ? d.q[i] : (d.qT ? d.qT[i] : 0)) / maxq * 100}%"></i><b style="left:${d.p[i] / maxq * 100}%" title="raw ${(d.p[i] * 100).toFixed(1)}%"></b></div><span class="n">${alive ? (d.q[i] * 100).toFixed(1) + "%" : "cut"}</span></div>`; });
+  const restMass = d.order.slice(N).reduce((a, i) => a + d.q[i], 0);
+  rows.push(`<div class="row rest"><span class="tk">+${d.M.V.length - N} more</span><div class="bar"><i style="width:${restMass / maxq * 100}%"></i></div><span class="n">${(restMass * 100).toFixed(1)}%</span></div>`);
+  d3.select("#dist").html(rows.join(""));
+  const H0 = entropy(d.p), H = entropy(d.q);
+  d3.select("#dstat").html(`<span>raw entropy <b>${H0.toFixed(2)}</b> bits</span><span>after reshaping <b class="${H < 0.5 ? "warn" : ""}">${H.toFixed(2)}</b> bits</span><span>alive <b class="${d.alive <= 2 ? "warn" : ""}">${d.alive}</b> of ${d.M.V.length}</span><span>${d.greedy ? "<b class=warn>greedy</b>" : `T ${s.temp}${s.topk ? " · k " + s.topk : ""}${s.topp < 1 ? " · p " + s.topp : ""}`}</span>`);
+  d3.select("#gen").html(`<span class="pr">${esc(s.prompt)}</span>${s.gen.map((t, i) => `<span class="g${i === s.gen.length - 1 ? " last" : ""}">${esc(t).replace(/▁/g, " ")}</span>`).join("")}${s.gen.length ? "" : ` <span class="hint">← sample or generate to continue</span>`}`);
+  d3.select("#pipe").html(`<b>pipeline</b>: log p ÷ T → softmax → ${s.topk ? `keep top ${s.topk}` : "no top-k"} → ${s.topp < 1 ? `keep mass ${s.topp}` : "no top-p"} → renormalise → draw u ∈ [0,1) and walk the cumulative bars${s.last && s.gen.length ? ` · last u = ${s.last.u.toFixed(3)}` : ""}`);
+  d3.select("#cst").text(`${s.gen.length} generated`);
+}
+
+/* ============================================================================
+   6. LESSON
+   ========================================================================= */
+const LESSON = [
+  { title: "Zero merges: letters",
+    body: `A byte-pair tokenizer starts with nothing but characters. The ▁ marks the start of a
+    word — that's how "the" at a word start and "the" inside "other" get different pieces
+    later. Twenty-three tokens for six words.`,
+    try: "merges 0", expect: /^merges 0$/, readonly: true,
+    needs: s => s.merges === 0 && s.text === "the cat sat on the mat" },
+
+  { title: "Merge the most frequent pair",
+    body: `Training is one loop: count every adjacent pair across the corpus, merge the most
+    frequent one everywhere, add it to the vocabulary, repeat. Watch the merge list on the
+    left fill in and the pieces on the text grow. The first merges are the ones you'd guess:
+    ▁+t, th, ▁the.`,
+    try: "merges 10", expect: /^merges 10$/,
+    needs: s => s.merges !== 10 && s.text === "the cat sat on the mat" },
+
+  { title: "Common words become one piece",
+    body: `Forty merges in, "the", "cat", "sat" and "mat" are single tokens — because they're
+    common in <em>this</em> corpus. A vocabulary is a record of frequency in the training data,
+    not a dictionary. Six words, six tokens.`,
+    try: "merges 40", expect: /^merges 40$/,
+    needs: s => s.merges !== 40 && s.text === "the cat sat on the mat" },
+
+  { title: "A word the corpus never saw",
+    body: `Same forty merges, a new word. It shatters into whatever pieces happen to exist —
+    an s, a t, a raw, a berry, or something less tidy. The model will receive those pieces as
+    ids and nothing else.`,
+    try: "text strawberry", expect: /^text strawberry$/,
+    needs: s => s.merges === 40 && s.text !== "strawberry" },
+
+  { title: "Count the r's",
+    body: `Three r's across nine pieces. This vocabulary is tiny, so most letters stay pieces
+    of their own; a real tokenizer with 100k pieces writes "strawberry" as two or three, and
+    the r's vanish inside them. Either way the model receives ids, not letters, and to count
+    r's it must know the spelling of each of its own pieces — something it was never told.
+    That is why letter-counting trips up models that can write sonnets.`,
+    try: "letters r", expect: /^letters r$/,
+    needs: s => s.text === "strawberry" && s.letter !== "r" },
+
+  { title: "The other end: a distribution",
+    body: `Now the output side. The model's job is one thing: given the context, a
+    probability for every piece in the vocabulary. This one is a tiny trigram model over the
+    same corpus, so after "the cat sat on the" it strongly expects "mat". The grey ticks are
+    the raw probabilities; the bars are what the sampler will actually use.`,
+    try: "prompt the cat sat on the", expect: /^prompt the cat sat on the$/,
+    needs: s => s.gen.length > 0 || s.prompt !== "the cat sat on the" || s.temp !== 1 },
+
+  { title: "Roll",
+    body: `A uniform random number u is drawn and walked along the cumulative bars; whichever
+    piece it lands in is emitted. Most of the time that's "mat". Sometimes not — that is the
+    whole difference between a language model and a lookup table.`,
+    try: "sample", expect: /^sample$/,
+    needs: s => s.prompt === "the cat sat on the" && s.gen.length === 0 && s.temp === 1 },
+
+  { title: "Temperature down",
+    body: `Divide the log-probabilities by T before the softmax. At 0.3 the top piece swallows
+    almost everything; entropy drops toward zero. Watch the bars sharpen while the grey raw
+    ticks stay where they were.`,
+    try: "temp 0.3", expect: /^temp 0\.3$/,
+    needs: s => s.temp !== 0.3 && s.prompt === "the cat sat on the" },
+
+  { title: "…fresh prompt",
+    body: `Start the same sentence again so the sharpened model continues from a clean context.`,
+    try: "prompt the cat sat on the", expect: /^prompt the cat sat on the$/,
+    needs: s => s.temp === 0.3 && (s.gen.length > 0 || s.prompt !== "the cat sat on the") },
+
+  { title: "…and generate",
+    body: `Twenty-four pieces at low temperature. The model stitches together the corpus's most
+    common sentences almost verbatim and stops inventing. Low temperature is "safe" in exactly
+    this sense: fluent, predictable, and unable to say anything the training data didn't say
+    often. Push it all the way down and it can't even vary — you'll see that at the end.`,
+    try: "generate 24", expect: /^generate 24$/,
+    needs: s => s.temp === 0.3 && s.prompt === "the cat sat on the" && s.gen.length === 0 },
+
+  { title: "Temperature up",
+    body: `At 2.0 the distribution flattens toward uniform. Pieces the model considers
+    absurd get real probability.`,
+    try: "temp 2", expect: /^temp 2$/,
+    needs: s => s.temp !== 2 },
+
+  { title: "…and generate",
+    body: `Fresh prompt, twelve pieces. Fragments, half-words, wrong spaces: high temperature
+    is where the vocabulary's ugliest pieces come out.`,
+    try: "prompt the dog sat on the", expect: /^prompt the dog sat on the$/,
+    needs: s => s.temp === 2 && s.prompt !== "the dog sat on the" },
+
+  { title: "…go",
+    body: `Roll twelve times.`,
+    try: "generate 12", expect: /^generate 12$/,
+    needs: s => s.temp === 2 && s.prompt === "the dog sat on the" && s.gen.length === 0 },
+
+  { title: "Top-k: cut the tail by count",
+    body: `Back to T = 1, then keep only the three most likely pieces and renormalise. Struck
+    rows are cut. Top-k is blunt: three is too many when one piece has 90%, and too few when
+    twenty pieces are plausible.`,
+    try: "temp 1", expect: /^temp 1$/,
+    needs: s => s.temp !== 1 },
+
+  { title: "…top-k 3",
+    body: `Three survive.`,
+    try: "topk 3", expect: /^topk 3$/,
+    needs: s => s.topk !== 3 && s.temp === 1 },
+
+  { title: "Top-p: cut the tail by mass",
+    body: `Turn top-k off and keep the smallest set of pieces whose probabilities add up to
+    0.9. The number that survive now depends on the shape of the distribution: read the
+    "alive" count, then change the prompt to something less predictable and read it again.`,
+    try: "topk 0", expect: /^topk 0$/,
+    needs: s => s.topk !== 0 },
+
+  { title: "…top-p 0.9",
+    body: `Adaptive truncation.`,
+    try: "topp 0.9", expect: /^topp 0\.9$/,
+    needs: s => s.topp !== 0.9 && s.topk === 0 },
+
+  { title: "…a vaguer prompt",
+    body: `After just "the", many continuations are plausible, so more pieces stay alive under
+    the same 0.9. That adaptivity is why top-p is the usual default and top-k isn't.`,
+    try: "prompt the", expect: /^prompt the$/,
+    needs: s => s.topp === 0.9 && s.prompt !== "the" },
+
+  { title: "Greedy",
+    body: `T = 0 is not "no randomness in the model"; it's a sampler that always takes the
+    top piece. Deterministic — the same prompt gives the same text every time.`,
+    try: "temp 0", expect: /^temp 0$/,
+    needs: s => s.temp !== 0 },
+
+  { title: "…and the loop",
+    body: `Twenty-four greedy pieces. The most likely continuation of "the cat sat on the mat ."
+    is "the cat sat on the mat ." and nothing can ever break the cycle, because nothing is
+    ever rolled. This is why production samplers keep a little temperature and add repetition
+    penalties: a small chance of the second-best piece is what gets a model out of a rut.`,
+    try: "generate 24", expect: /^generate 24$/,
+    needs: s => s.temp === 0 && s.gen.length === 0 },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Drag merges to the end and tokenize a
+    sentence from the corpus versus one that isn't; <code>seed 3</code> then <code>generate 20</code>
+    at T = 0.8 with top-p 0.9 for a plausible-sounding story; or <code>letters e</code> on any text.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   7. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("mslider").max = MERGES.length;
+document.getElementById("mslider").addEventListener("input", e => run(`merges ${e.target.value}`));
+document.getElementById("tslider").addEventListener("change", e => run(`temp ${e.target.value}`));
+document.getElementById("kslider").addEventListener("change", e => run(`topk ${e.target.value}`));
+document.getElementById("pslider").addEventListener("change", e => run(`topp ${e.target.value}`));
+document.getElementById("sbtn").onclick = () => run("sample");
+document.getElementById("gbtn").onclick = () => run("generate 10");
+document.getElementById("ubtn").onclick = () => run("undo");
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Tokens & sampling loaded. Drag the merges slider, or type 'help'.", "dim");
+</script>
+</body>
+</html>
