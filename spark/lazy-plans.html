@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nothing runs until you ask — a spark sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   The logical plan is what you wrote (purple). What the optimizer changed
+   is amber. Exchanges — the shuffle walls — are red. Stages get their own
+   hues so "which tasks run together" is a colour.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --plan:#b08be8; --opt:#e8a33d; --wall:#e06c6c; --ok:#6fbf73;
+  --s0:#5cc8d6; --s1:#6fbf73; --s2:#e07aa8; --s3:#c9b458; --s4:#7fa0e8; --s5:#b08be8;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--opt)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--plan);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--plan);color:var(--plan)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--plan);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the plan as a tree that grows while you type and doesn't
+   run, then — on an action — gets rewritten (amber), walled (red) and cut
+   into stages (coloured bands). Beside it: the code, the rewrites, the
+   stages, and the real explain() text.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.cap .st.lazy{color:var(--plan)} .cap .st.ran{color:var(--ok)}
+.stage{display:grid;grid-template-columns:270px 1fr;gap:12px;align-items:start}
+.side{display:flex;flex-direction:column;gap:12px}
+.code{padding:8px 12px;font-family:var(--code);font-size:11px;display:flex;flex-direction:column;gap:4px;min-height:60px}
+.code .l{color:var(--ink-dim);white-space:pre-wrap;word-break:break-word}
+.code .l b{color:var(--plan);font-weight:400}
+.code .l.act{color:var(--ok)}
+.code .none{color:var(--ink-faint)}
+.views{display:flex;gap:4px;padding:8px 12px;border-bottom:1px solid var(--line);font-family:var(--code);font-size:11px;align-items:center;flex-wrap:wrap}
+.views .v{padding:3px 9px;font-size:11px}
+.views .v.on{border-color:var(--plan);color:var(--plan);background:rgba(176,139,232,.12)}
+.views .v.on.opt{border-color:var(--opt);color:var(--opt);background:rgba(232,163,61,.1)}
+.views .v.on.phys{border-color:var(--ok);color:var(--ok);background:rgba(111,191,115,.1)}
+.views .hint{color:var(--ink-faint);margin-left:auto}
+.dag{overflow:auto;max-height:520px}
+#dag{display:block}
+#dag text{font-family:var(--code)}
+#dag .node rect{fill:var(--bg);stroke:var(--line);stroke-width:1.2;rx:4}
+#dag .node text.op{font-size:11px;font-weight:700;fill:var(--ink)}
+#dag .node text.d{font-size:9.5px;fill:var(--ink-dim)}
+#dag .node.changed rect{stroke:var(--opt)} #dag .node.changed text.op{fill:var(--opt)}
+#dag .node.wall rect{stroke:var(--wall);stroke-dasharray:5 3;fill:rgba(224,108,108,.08)} #dag .node.wall text.op{fill:var(--wall)}
+#dag .node.bcast rect{stroke:var(--opt);stroke-dasharray:5 3;fill:rgba(232,163,61,.06)} #dag .node.bcast text.op{fill:var(--opt)}
+#dag .edge{fill:none;stroke:var(--line);stroke-width:1.4}
+#dag .rows{font-size:9px;fill:var(--ink-faint)}
+#dag .band{rx:6;opacity:.14}
+#dag .bandlbl{font-size:9.5px;font-weight:700;letter-spacing:.06em}
+.rules{padding:8px 12px;display:flex;flex-direction:column;gap:6px}
+.rule{border:1px solid var(--line);border-left:3px solid var(--opt);border-radius:var(--r);padding:6px 9px;background:var(--bg);font-family:var(--code);font-size:10.5px}
+.rule .n{color:var(--opt);font-weight:700;font-size:11px;margin-bottom:2px}
+.rule .w{color:var(--ink-dim);line-height:1.45}
+.rules .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.stages{padding:8px 12px;font-family:var(--code);font-size:11px;display:flex;flex-direction:column;gap:5px}
+.stg{display:grid;grid-template-columns:60px 1fr auto;gap:8px;align-items:center;color:var(--ink-dim)}
+.stg .id{font-family:var(--mono);font-weight:700}
+.stg .t{color:var(--ink)}
+.stg .bar{height:8px;background:var(--panel-2);border-radius:2px;overflow:hidden}
+.stg .bar i{display:block;height:100%}
+.stages .tot{color:var(--ink-faint);border-top:1px solid var(--line);padding-top:6px;margin-top:2px}
+.stages .none{color:var(--ink-faint)}
+.explain{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);white-space:pre;overflow-x:auto;line-height:1.5;max-height:260px;overflow-y:auto}
+.explain .x{color:var(--wall)} .explain .b{color:var(--opt)} .explain .h{color:var(--ink-faint)}
+.conf{padding:6px 12px 8px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);border-top:1px solid var(--line);display:flex;gap:12px;flex-wrap:wrap}
+.conf b{color:var(--ink-dim);font-weight:400}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:">>> ";color:var(--plan)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--ok)} .log .mod{color:var(--opt)} .log .err{color:var(--wall)} .log .p{color:var(--plan)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--plan)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:800px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 01 · Data engineering</p>
+  <h1>Nothing runs until you <em>ask</em>. Then everything runs at once</h1>
+  <p class="standfirst">A PySpark DataFrame is not data. It's a description of how to get data,
+  and every method call makes the description longer. Only an action — show, count, write —
+  hands it to the engine, which rewrites it, plans it, cuts it into stages, and finally reads
+  a file. Type the code and watch the plan; then ask, and watch what the engine does to it.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="side">
+      <div class="box">
+        <div class="cap"><span>Your code</span><span class="st" id="codest"></span></div>
+        <div class="code" id="code"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>What the optimizer changed</span></div>
+        <div class="rules" id="rules"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>Stages and tasks</span></div>
+        <div class="stages" id="stages"></div>
+        <div class="conf" id="conf"></div>
+      </div>
+    </div>
+    <div class="side">
+      <div class="box">
+        <div class="cap"><span>The plan</span><span class="st" id="planst"></span></div>
+        <div class="views" id="views">
+          <button class="v" data-v="logical">logical · what you wrote</button>
+          <button class="v opt" data-v="optimized">optimized · what Catalyst made of it</button>
+          <button class="v phys" data-v="physical">physical · stages and shuffles</button>
+        </div>
+        <div class="dag"><svg id="dag"></svg></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>explain()</span><span class="st" id="expst"></span></div>
+        <div class="explain" id="explain"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>&gt;&gt;&gt;</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="pyspark" placeholder='events = spark.read.parquet("events")'>
+    </div>
+  </div>
+  <p class="hintbar"><code>df = events.filter("country = 'DE'")</code> · <code>df = df.join(users, "user_id")</code> ·
+  <code>df = df.groupBy("plan").agg(sum("value"))</code> · <code>df.explain()</code> · <code>df.show()</code> ·
+  <code>conf shuffle.partitions 8</code> · <code>conf autoBroadcast off</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes, with a Python-flavoured
+    prompt. The plan is a real tree with estimated row counts; the optimizer is four of
+    Catalyst's hundreds of rules (combine filters, push predicates down, prune columns,
+    collapse projections), applied in order and recorded as before/after; the physical
+    planner inserts a shuffle exchange under every aggregate and sort-merge join and a
+    broadcast exchange under a small join side, then cuts stages at the exchanges and counts
+    one task per partition. Row estimates use fixed selectivities. Two tables:
+    <code>events</code> (1M rows, 8 partitions, 512 MB) and <code>users</code> (50k rows, 4
+    partitions, 6 MB, small enough to broadcast).
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. TABLES, PLAN NODES, ESTIMATES
+   ========================================================================= */
+const TABLES = {
+  events: { cols: ["user_id", "country", "event_type", "ts", "value"], rows: 1e6, parts: 8, mb: 512 },
+  users:  { cols: ["user_id", "name", "plan", "signup_country"], rows: 5e4, parts: 4, mb: 6 }
+};
+const SEL = { country: 0.12, plan: 0.2, event_type: 0.3, signup_country: 0.12 };
+const GROUPS = { plan: 3, country: 40, event_type: 6, user_id: 5e4, name: 5e4, signup_country: 40 };
+const fmtRows = n => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(Math.round(n));
+
+function initialState() {
+  return { dfs: {}, order: [], conf: { shufflePartitions: 200, autoBroadcast: true }, last: null, view: "logical", focus: null, jobs: 0 };
+}
+const clone = s => structuredClone(s);
+
+/* plan nodes: {op, ...fields, kids: []} — plain data so the state clones */
+const N = (op, fields, kids = []) => ({ op, ...fields, kids });
+const cond = text => { const m = /^\s*(\w+)\s*(=|!=|>=|<=|>|<)\s*(.+?)\s*$/.exec(text); if (!m) throw new Error(`can't parse condition "${text}" — use col = 'x' or col > 10`); return { col: m[1], op: m[2], val: m[3].replace(/^['"]|['"]$/g, ""), text: text.trim() }; };
+const selOf = c => c.op === "=" ? (SEL[c.col] ?? 0.1) : c.op === "!=" ? 0.9 : 0.3;
+
+function schema(n) {
+  switch (n.op) {
+    case "Scan": return n.cols.slice();
+    case "Filter": case "Sort": case "Limit": return schema(n.kids[0]);
+    case "Project": return n.cols.slice();
+    case "Join": { const l = schema(n.kids[0]), r = schema(n.kids[1]); return [...l, ...r.filter(c => !l.includes(c))]; }
+    case "Aggregate": return [...n.keys, ...n.aggs.map(a => a.name)];
+  }
+}
+function baseRows(n) { return n.op === "Scan" ? TABLES[n.table].rows : n.op === "Join" ? baseRows(n.kids[0]) : baseRows(n.kids[0]); }
+function rows(n) {
+  switch (n.op) {
+    case "Scan": return TABLES[n.table].rows * (n.pushed || []).reduce((a, c) => a * selOf(c), 1);
+    case "Filter": return rows(n.kids[0]) * n.conds.reduce((a, c) => a * selOf(c), 1);
+    case "Project": case "Sort": return rows(n.kids[0]);
+    case "Limit": return Math.min(n.n, rows(n.kids[0]));
+    case "Join": { const l = rows(n.kids[0]), r = rows(n.kids[1]); const frac = Math.min(1, r / baseRows(n.kids[1])); return l * frac; }
+    case "Aggregate": return Math.min(rows(n.kids[0]), n.keys.reduce((a, k) => a * (GROUPS[k] ?? 100), 1) || 1);
+  }
+}
+function label(n) {
+  switch (n.op) {
+    case "Scan": return { op: `Scan ${n.table}`, d: `${n.cols.length === TABLES[n.table].cols.length ? "all " : ""}${n.cols.length}/${TABLES[n.table].cols.length} cols${n.pushed?.length ? " · pushed: " + n.pushed.map(c => c.text).join(", ") : ""}` };
+    case "Filter": return { op: "Filter", d: n.conds.map(c => c.text).join(" AND ") };
+    case "Project": return { op: "Project", d: n.cols.join(", ") };
+    case "Join": return { op: "Join", d: `on ${n.key}` };
+    case "Aggregate": return { op: "Aggregate", d: `by ${n.keys.join(", ") || "()"} → ${n.aggs.map(a => a.name).join(", ")}` };
+    case "Sort": return { op: "Sort", d: n.col + (n.desc ? " desc" : "") };
+    case "Limit": return { op: "Limit", d: String(n.n) };
+  }
+}
+const sig = n => JSON.stringify(n, (k, v) => k === "kids" ? undefined : v) + n.kids.map(sig).join("|");
+/* Spark-style tree printing: ":- " for a branch that has siblings below it,
+   "+- " for the last child, and ":  " continuation lines under a branch. */
+function treeLines(n, fmt, prefix = "", isLast = true, isRoot = true) {
+  const lines = [{ node: n, t: `${prefix}${isRoot ? "" : isLast ? "+- " : ":- "}${fmt(n)}` }];
+  const childPrefix = isRoot ? "" : prefix + (isLast ? "   " : ":  ");
+  n.kids.forEach((k, i) => lines.push(...treeLines(k, fmt, childPrefix, i === n.kids.length - 1, false)));
+  return lines;
+}
+function text(n) {
+  return treeLines(n, x => { const l = label(x); return `${l.op}${l.d ? " [" + l.d + "]" : ""}  ~${fmtRows(rows(x))} rows`; }).map(l => l.t).join("\n");
+}
+
+/* ============================================================================
+   2. THE OPTIMIZER — four rules, each returning (plan, note|null)
+   ========================================================================= */
+const usesOnly = (conds, cols) => conds.every(c => cols.includes(c.col));
+const RULES = [
+  { name: "CombineFilters", fn: function f(n) { n.kids = n.kids.map(f); if (n.op === "Filter" && n.kids[0].op === "Filter") { const c = n.kids[0]; return N("Filter", { conds: [...c.conds, ...n.conds] }, c.kids); } return n; },
+    why: (a, b) => "Two stacked filters became one predicate with AND. One pass over the rows instead of two." },
+  { name: "PushDownPredicates", fn: function f(n) {
+      n.kids = n.kids.map(f);
+      if (n.op !== "Filter") return n;
+      const child = n.kids[0];
+      if (child.op === "Project" || child.op === "Sort") { const inner = f(N("Filter", { conds: n.conds }, child.kids)); return Object.assign({}, child, { kids: [inner] }); }
+      if (child.op === "Join") {
+        const L = schema(child.kids[0]), R = schema(child.kids[1]);
+        /* a conjunct goes to whichever side owns its column; the join key is on both, so it stays left */
+        const left = n.conds.filter(c => L.includes(c.col)), right = n.conds.filter(c => R.includes(c.col) && !L.includes(c.col)), rest = n.conds.filter(c => !left.includes(c) && !right.includes(c));
+        const lk = left.length ? f(N("Filter", { conds: left }, [child.kids[0]])) : child.kids[0];
+        const rk = right.length ? f(N("Filter", { conds: right }, [child.kids[1]])) : child.kids[1];
+        const j = Object.assign({}, child, { kids: [lk, rk] });
+        return rest.length ? N("Filter", { conds: rest }, [j]) : j;
+      }
+      if (child.op === "Scan") return Object.assign({}, child, { pushed: [...(child.pushed || []), ...n.conds] });
+      return n;
+    },
+    why: (a, b) => "Filters moved below the join and into the file scans. Parquet skips row groups that can't match, and the join sees only surviving rows." },
+  { name: "ColumnPruning", fn: function f(n, need = null) {
+      const out = schema(n); const req = need ? out.filter(c => need.includes(c)) : out;
+      switch (n.op) {
+        case "Scan": { const cols = TABLES[n.table].cols.filter(c => req.includes(c) || (n.pushed || []).some(p => p.col === c)); return Object.assign({}, n, { cols }); }
+        case "Filter": return Object.assign({}, n, { kids: [f(n.kids[0], [...new Set([...req, ...n.conds.map(c => c.col)])])] });
+        case "Project": return Object.assign({}, n, { cols: n.cols.filter(c => req.includes(c)), kids: [f(n.kids[0], n.cols.filter(c => req.includes(c)))] });
+        case "Join": { const L = schema(n.kids[0]), R = schema(n.kids[1]); const needL = [...new Set([n.key, ...req.filter(c => L.includes(c))])], needR = [...new Set([n.key, ...req.filter(c => R.includes(c) && !L.includes(c))])]; return Object.assign({}, n, { kids: [f(n.kids[0], needL), f(n.kids[1], needR)] }); }
+        case "Aggregate": return Object.assign({}, n, { kids: [f(n.kids[0], [...new Set([...n.keys, ...n.aggs.map(a => a.col).filter(Boolean)])])] });
+        case "Sort": return Object.assign({}, n, { kids: [f(n.kids[0], [...new Set([...req, n.col])])] });
+        case "Limit": return Object.assign({}, n, { kids: [f(n.kids[0], req)] });
+      }
+    },
+    why: (a, b) => { const scans = []; (function walk(n) { if (n.op === "Scan") scans.push(`${n.table} reads ${n.cols.length} of ${TABLES[n.table].cols.length} columns`); n.kids.forEach(walk); })(b); return `Columns nobody uses are never read from disk (parquet is columnar, so this is a real saving): ${scans.join("; ")}.`; } },
+  { name: "CollapseProject", fn: function f(n) { n.kids = n.kids.map(f); if (n.op === "Project" && n.kids[0].op === "Project") return N("Project", { cols: n.cols }, n.kids[0].kids); return n; },
+    why: () => "Two projections in a row became one." }
+];
+function optimize(plan) {
+  let cur = structuredClone(plan); const notes = [];
+  for (const r of RULES) { const before = sig(cur); const next = r.fn(structuredClone(cur)); if (sig(next) !== before) { notes.push({ name: r.name, why: r.why(cur, next) }); cur = next; } }
+  return { plan: cur, notes };
+}
+
+/* ============================================================================
+   3. PHYSICAL PLANNING — exchanges, stages, tasks
+   ========================================================================= */
+function physical(plan, conf) {
+  const P = (op, d, kids = [], extra = {}) => ({ op, d, kids, ...extra });
+  const go = n => {
+    switch (n.op) {
+      case "Scan": return P("FileScan parquet", `${n.table} [${n.cols.join(",")}]${n.pushed?.length ? " PushedFilters: [" + n.pushed.map(c => c.text).join(", ") + "]" : ""}`, [], { parts: TABLES[n.table].parts, table: n.table, rows: rows(n) });
+      case "Filter": return P("Filter", n.conds.map(c => c.text).join(" AND "), [go(n.kids[0])], { rows: rows(n) });
+      case "Project": return P("Project", n.cols.join(", "), [go(n.kids[0])], { rows: rows(n) });
+      case "Sort": return P("Sort", n.col, [P("Exchange", `rangepartitioning(${n.col}, ${conf.shufflePartitions})`, [go(n.kids[0])], { wall: true, parts: conf.shufflePartitions })], { rows: rows(n) });
+      case "Limit": return n.kids[0].op === "Sort" ? P("TakeOrderedAndProject", `limit ${n.n}, sort ${n.kids[0].col}`, [go(n.kids[0].kids[0])], { rows: rows(n) }) : P("CollectLimit", String(n.n), [go(n.kids[0])], { rows: rows(n) });
+      case "Aggregate": { const fns = n.aggs.map(a => a.name).join(", "); return P("HashAggregate", `keys=[${n.keys.join(",")}] final ${fns}`, [P("Exchange", `hashpartitioning(${n.keys.join(",") || "()"}, ${conf.shufflePartitions})`, [P("HashAggregate", `keys=[${n.keys.join(",")}] partial ${fns}`, [go(n.kids[0])], { rows: Math.min(rows(n.kids[0]), rows(n) * 8) })], { wall: true, parts: conf.shufflePartitions })], { rows: rows(n) }); }
+      case "Join": {
+        const l = go(n.kids[0]), r = go(n.kids[1]);
+        const rSmall = TABLES[leafTable(n.kids[1])].mb <= 10, lSmall = TABLES[leafTable(n.kids[0])].mb <= 10;
+        if (conf.autoBroadcast && (rSmall || lSmall)) {
+          const big = rSmall ? l : r, small = rSmall ? r : l;
+          return P("BroadcastHashJoin", `[${n.key}] build ${rSmall ? "right" : "left"}`, [big, P("BroadcastExchange", `${fmtRows(rows(rSmall ? n.kids[1] : n.kids[0]))} rows → every executor`, [small], { bcast: true })], { rows: rows(n) });
+        }
+        return P("SortMergeJoin", `[${n.key}]`, [P("Sort", n.key, [P("Exchange", `hashpartitioning(${n.key}, ${conf.shufflePartitions})`, [l], { wall: true, parts: conf.shufflePartitions })]), P("Sort", n.key, [P("Exchange", `hashpartitioning(${n.key}, ${conf.shufflePartitions})`, [r], { wall: true, parts: conf.shufflePartitions })])], { rows: rows(n) });
+      }
+    }
+  };
+  const leafTable = n => n.op === "Scan" ? n.table : leafTable(n.kids[0]);
+  const root = go(plan);
+  /* stages: a new one begins above every shuffle exchange; the broadcast side is its own too */
+  const stages = []; let sid = 0;
+  const assign = (n, stage) => {
+    n.stage = stage.id; stage.nodes.push(n);
+    n.kids.forEach(k => {
+      if (k.wall) { const st = { id: ++sid, nodes: [], parts: k.parts, kind: "shuffle" }; stage.parts = stage.parts ?? k.parts; stages.push(st); k.stage = stage.id; stage.nodes.push(k); assign(k.kids[0], st); }
+      else if (k.bcast) { const st = { id: ++sid, nodes: [], kind: "broadcast" }; stages.push(st); k.stage = stage.id; stage.nodes.push(k); assign(k.kids[0], st); }
+      else assign(k, stage);
+    });
+  };
+  const s0 = { id: 0, nodes: [], kind: "result" }; stages.push(s0); assign(root, s0);
+  /* tasks per stage = partitions of whatever feeds it: a scan's files, or the exchange below it */
+  stages.forEach(st => {
+    const feed = st.nodes.find(n => n.op === "FileScan parquet") ; const ex = st.nodes.find(n => n.wall && n.stage === st.id);
+    st.tasks = ex ? ex.parts : feed ? feed.parts : 1;
+    st.what = st.nodes.filter(n => !n.wall && !n.bcast).map(n => n.op.replace("FileScan parquet", "Scan")).reverse().join(" → ");
+  });
+  /* order stages bottom-up like Spark numbers them: leaves first */
+  const ordered = stages.slice().sort((a, b) => b.id - a.id).map((st, i) => Object.assign(st, { num: i }));
+  return { root, stages: ordered };
+}
+function explainText(p) {
+  const num = id => p.stages.find(st => st.id === id)?.num ?? id;
+  return treeLines(p.root, n => `${n.stage !== undefined && !n.wall && !n.bcast ? `*(${num(n.stage)}) ` : ""}${n.op}${n.d ? " " + n.d : ""}${n.rows !== undefined ? "   ~" + fmtRows(n.rows) : ""}`)
+    .map(l => ({ t: l.t, cls: l.node.wall ? "x" : l.node.bcast ? "b" : "" }));
+}
+
+/* ============================================================================
+   4. THE MINI PYSPARK PARSER
+   ========================================================================= */
+function parseArgs(str) {
+  const out = []; let cur = "", depth = 0, q = null;
+  for (const ch of str) { if (q) { cur += ch; if (ch === q) q = null; continue; } if (ch === '"' || ch === "'") { q = ch; cur += ch; continue; }
+    if (ch === "(") depth++; if (ch === ")") depth--; if (ch === "," && depth === 0) { out.push(cur.trim()); cur = ""; } else cur += ch; }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+const unq = s => s.replace(/^['"]|['"]$/g, "");
+function parseChain(src, s) {
+  const m = /^([A-Za-z_]\w*)((?:\.\w+\([^]*?\))*)$/.exec(src.trim());
+  let plan, calls = [];
+  if (/^spark\.read\.(parquet|table|csv)\(/.test(src.trim())) {
+    const t = unq(/\((.*?)\)/.exec(src)[1]); if (!TABLES[t]) throw new Error(`no table "${t}" — try events or users`);
+    plan = N("Scan", { table: t, cols: TABLES[t].cols.slice() }); calls = []; const rest = src.trim().replace(/^spark\.read\.\w+\([^)]*\)/, ""); return applyCalls(plan, rest, s);
+  }
+  if (!m) throw new Error(`can't parse "${src}"`);
+  if (!s.dfs[m[1]]) throw new Error(`NameError: name '${m[1]}' is not defined`);
+  return applyCalls(structuredClone(s.dfs[m[1]].plan), m[2], s);
+}
+function applyCalls(plan, rest, s) {
+  const re = /\.(\w+)\(((?:[^()]|\([^()]*\))*)\)/g; let mm, action = null;
+  while ((mm = re.exec(rest))) {
+    const [, fn, argstr] = mm; const args = parseArgs(argstr);
+    switch (fn) {
+      case "filter": case "where": plan = N("Filter", { conds: [cond(unq(args[0] || ""))] }, [plan]); break;
+      case "select": { const cols = args.map(unq); const have = schema(plan); const bad = cols.find(c => !have.includes(c)); if (bad) throw new Error(`AnalysisException: column '${bad}' not found; have ${have.join(", ")}`); plan = N("Project", { cols }, [plan]); break; }
+      case "join": { const other = s.dfs[args[0]]; if (!other) throw new Error(`NameError: name '${args[0]}' is not defined`); const key = unq(args[1] || "user_id"); plan = N("Join", { key }, [plan, structuredClone(other.plan)]); break; }
+      case "groupBy": case "groupby": { const keys = args.map(unq); plan = N("Aggregate", { keys, aggs: [] }, [plan]); plan.pendingGroup = true; break; }
+      case "count": if (plan.pendingGroup) { plan.aggs = [{ name: "count", col: null }]; delete plan.pendingGroup; } else action = "count"; break;
+      case "agg": { if (!plan.pendingGroup) plan = N("Aggregate", { keys: [], aggs: [] }, [plan]); delete plan.pendingGroup;
+        plan.aggs = args.map(a => { const am = /^(sum|avg|max|min|count)\(\s*['"]?(\w+)['"]?\s*\)$/.exec(a); if (!am) throw new Error(`can't parse aggregate "${a}" — use sum("value"), avg("value"), count("*")`); return { name: `${am[1]}(${am[2]})`, col: am[2] === "*" ? null : am[2] }; }); break; }
+      case "orderBy": case "sort": plan = N("Sort", { col: unq(args[0]), desc: /desc/i.test(args[1] || "") }, [plan]); break;
+      case "limit": plan = N("Limit", { n: +args[0] || 10 }, [plan]); break;
+      case "show": action = "show"; break;
+      case "collect": action = "collect"; break;
+      case "explain": action = "explain"; break;
+      case "cache": case "persist": break;
+      default: throw new Error(`AttributeError: 'DataFrame' object has no attribute '${fn}' (this sandbox knows filter, select, join, groupBy, agg, count, orderBy, limit, show, collect, explain)`);
+    }
+  }
+  if (plan.pendingGroup) throw new Error("groupBy needs .count() or .agg(...) after it");
+  return { plan, action };
+}
+
+/* ============================================================================
+   5. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+
+function runJob(s, name, plan, action, src) {
+  const n = clone(s);
+  const { plan: opt, notes } = optimize(plan);
+  const phys = physical(opt, n.conf);
+  const tasks = phys.stages.reduce((a, st) => a + st.tasks, 0);
+  const executed = action !== "explain";
+  if (executed) n.jobs++;
+  n.last = { name, src, action, logical: plan, optimized: opt, notes, phys, tasks, executed, job: executed ? n.jobs : null };
+  n.view = executed ? "physical" : "optimized";
+  const out = [line(executed ? `job ${n.jobs}: ${action}() on ${name} — ${phys.stages.length} stage(s), ${tasks} task(s), result ~${fmtRows(rows(opt))} rows` : `explain(): planned, not executed`, executed ? "add" : "mod")];
+  notes.forEach(r => out.push(line(`  ${r.name}: ${r.why}`, "mod")));
+  phys.stages.forEach(st => out.push(line(`  stage ${st.num} (${st.kind}): ${st.tasks} task(s) — ${st.what}`, "ok")));
+  if (!executed) out.push(line("no file was read. explain() runs the optimizer and the planner and stops there.", "dim"));
+  return { state: n, out };
+}
+
+const REGISTRY = {
+  "conf": (s, args) => { const [k, v] = args; const n = clone(s);
+    if (/shuffle/.test(k || "")) { const p = +v; if (!(p >= 1 && p <= 1000)) return fail("conf shuffle.partitions <1–1000>"); n.conf.shufflePartitions = p; return { state: n, out: [line(`spark.sql.shuffle.partitions = ${p} — every shuffle now produces ${p} partitions, so ${p} tasks in the stage after it`, "mod"), line("re-run an action to see the new plan", "dim")] }; }
+    if (/broadcast/i.test(k || "")) { if (!/^(on|off)$/.test(v || "")) return fail("conf autoBroadcast on|off"); n.conf.autoBroadcast = v === "on"; return { state: n, out: [line(n.conf.autoBroadcast ? "autoBroadcastJoinThreshold = 10MB: a join side under that is copied to every executor instead of shuffled" : "autoBroadcastJoinThreshold = -1: every join is a sort-merge join with a shuffle on both sides", "mod")] }; }
+    return fail("usage: conf shuffle.partitions N | conf autoBroadcast on|off");
+  },
+  "view": (s, args) => { if (!/^(logical|optimized|physical)$/.test(args[0] || "")) return fail("view logical|optimized|physical"); const n = clone(s); n.view = args[0]; return { state: n, out: [] }; },
+  "dfs": s => ({ out: s.order.length ? s.order.map(k => line(`${k}: ${text(s.dfs[k].plan).split("\n")[0]}`)) : [line("no DataFrames yet", "dim")] }),
+  "help": () => ({ out: [
+    line('events = spark.read.parquet("events")        a DataFrame is a plan, not data', "p"),
+    line('df = events.filter("country = \'DE\'")          transformations grow the plan', "p"),
+    line('df = df.join(users, "user_id") · df.select("a","b") · df.groupBy("plan").agg(sum("value")) · df.orderBy("x") · df.limit(10)', "ok"),
+    line("df.explain()                                  optimize + plan, don't run", "mod"),
+    line("df.show() · df.count() · df.collect()         actions: the job runs", "add"),
+    line("conf shuffle.partitions N · conf autoBroadcast on|off", "ok"),
+    line("view logical|optimized|physical · dfs · restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+
+function dispatch(state, raw) {
+  const src = raw.trim(); if (!src) return null;
+  const w = src.split(/\s+/)[0];
+  if (REGISTRY[w]) return REGISTRY[w](state, src.split(/\s+/).slice(1), raw);
+  try {
+    const am = /^([A-Za-z_]\w*)\s*=\s*(.+)$/.exec(src);
+    if (am) {
+      const { plan, action } = parseChain(am[2], state);
+      if (action) return fail(`${action}() returns ${action === "count" ? "a number" : action === "collect" ? "a list" : "None"}, not a DataFrame — call it without assigning`);
+      const n = clone(state); if (!n.dfs[am[1]]) n.order.push(am[1]); n.dfs[am[1]] = { plan, src }; n.focus = am[1]; n.view = "logical";
+      const l = label(plan);
+      return { state: n, out: [line(`${am[1]}: ${l.op}${l.d ? " [" + l.d + "]" : ""} — plan has ${countNodes(plan)} node(s), estimated ~${fmtRows(rows(plan))} rows`, "p"), line("nothing ran. No file was opened, no row was read.", "dim")] };
+    }
+    const { plan, action } = parseChain(src, state);
+    if (!action) return fail("that's a transformation with no assignment — it built a plan and threw it away. Assign it, or end with .show() / .count() / .explain()");
+    const nm = /^([A-Za-z_]\w*)/.exec(src)[1];
+    return runJob(state, nm, plan, action, src);
+  } catch (e) { return fail(e.message); }
+}
+const countNodes = n => 1 + n.kids.reduce((a, k) => a + countNodes(k), 0);
+
+/* ============================================================================
+   6. RENDERER
+   ========================================================================= */
+const BW = 176, BH = 44, XG = 200, YG = 74;
+function layout(root) {
+  let x = 0; const nodes = [], edges = [];
+  const place = (n, depth) => { const node = { n, depth }; nodes.push(node);
+    if (!n.kids.length) { node.x = x++; } else { const ks = n.kids.map(k => place(k, depth + 1)); node.x = ks.reduce((a, k) => a + k.x, 0) / ks.length; ks.forEach(k => edges.push({ from: k, to: node })); }
+    return node; };
+  place(root, 0);
+  const maxD = Math.max(...nodes.map(n => n.depth));
+  nodes.forEach(n => { n.px = 20 + n.x * XG; n.py = 24 + n.depth * YG; });
+  return { nodes, edges, w: 40 + Math.max(1, x) * XG, h: 60 + (maxD + 1) * YG };
+}
+function render(s) {
+  const focus = s.last ? s.last.name : s.focus;
+  const plan = s.last && s.view !== "logical" ? (s.view === "optimized" ? s.last.optimized : null) : (focus && s.dfs[focus] ? s.dfs[focus].plan : (s.last ? s.last.logical : null));
+  const view = s.last ? s.view : "logical";
+  d3.selectAll("#views .v").classed("on", function () { return this.dataset.v === view; }).property("disabled", function () { return this.dataset.v !== "logical" && !s.last; });
+  d3.select("#codest").attr("class", "st " + (s.last && s.last.executed ? "ran" : "lazy")).text(s.last && s.last.executed ? `${s.jobs} job(s) run` : s.order.length ? "lazy · nothing has run" : "");
+  const code = d3.select("#code");
+  code.html((s.order.length ? s.order.map(k => `<div class="l"><b>${k}</b> = ${s.dfs[k].src.replace(/^\w+\s*=\s*/, "")}</div>`).join("") : `<div class="none">nothing yet — read a table</div>`) + (s.last ? `<div class="l act">${s.last.src}</div>` : ""));
+
+  /* dag */
+  const svg = d3.select("#dag");
+  if (!plan && view !== "physical") { svg.attr("width", 300).attr("height", 60).html(`<text x="20" y="36" class="rows">no plan yet</text>`); }
+  else if (view === "physical") {
+    const P = s.last.phys; const L = layout(P.root);
+    svg.attr("width", L.w).attr("height", L.h).attr("viewBox", `0 0 ${L.w} ${L.h}`);
+    const stageColour = id => `var(--s${(P.stages.find(st => st.id === id)?.num ?? id) % 6})`;
+    /* bands: one rounded rect per stage around its nodes */
+    const bands = P.stages.map(st => { const ns = L.nodes.filter(n => n.n.stage === st.id && !n.n.wall && !n.n.bcast); if (!ns.length) return "";
+      const x0 = Math.min(...ns.map(n => n.px)) - 8, x1 = Math.max(...ns.map(n => n.px)) + BW + 8, y0 = Math.min(...ns.map(n => n.py)) - 8, y1 = Math.max(...ns.map(n => n.py)) + BH + 8;
+      return `<rect class="band" x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" fill="${stageColour(st.id)}"/><text class="bandlbl" x="${x0 + 4}" y="${y0 - 2}" fill="${stageColour(st.id)}">stage ${st.num} · ${st.tasks} task${st.tasks > 1 ? "s" : ""}</text>`; }).join("");
+    svg.html(bands + L.edges.map(e => `<path class="edge" d="M${e.from.px + BW / 2},${e.from.py} L${e.to.px + BW / 2},${e.to.py + BH}"/><text class="rows" x="${(e.from.px + e.to.px) / 2 + BW / 2 + 4}" y="${(e.from.py + e.to.py + BH) / 2 + 3}">${e.from.n.rows !== undefined ? "~" + fmtRows(e.from.n.rows) + " rows" : ""}</text>`).join("")
+      + L.nodes.map(n => `<g class="node${n.n.wall ? " wall" : n.n.bcast ? " bcast" : ""}" transform="translate(${n.px},${n.py})"><rect width="${BW}" height="${BH}"/><text class="op" x="8" y="17">${n.n.wall ? "⇅ Exchange (shuffle)" : n.n.bcast ? "⇉ Broadcast" : n.n.op}</text><text class="d" x="8" y="33">${trunc(n.n.d, 30)}</text><title>${n.n.op} ${n.n.d}</title></g>`).join(""));
+  } else {
+    const L = layout(plan); const changed = view === "optimized" ? new Set() : null;
+    if (changed) { const before = new Set(); (function w(n) { before.add(sig(n)); n.kids.forEach(w); })(s.last.logical); L.nodes.forEach(n => { if (!before.has(sig(n.n))) changed.add(n); }); }
+    svg.attr("width", L.w).attr("height", L.h).attr("viewBox", `0 0 ${L.w} ${L.h}`);
+    svg.html(L.edges.map(e => `<path class="edge" d="M${e.from.px + BW / 2},${e.from.py} L${e.to.px + BW / 2},${e.to.py + BH}"/><text class="rows" x="${(e.from.px + e.to.px) / 2 + BW / 2 + 4}" y="${(e.from.py + e.to.py + BH) / 2 + 3}">~${fmtRows(rows(e.from.n))} rows</text>`).join("")
+      + L.nodes.map(n => { const l = label(n.n); return `<g class="node${changed && changed.has(n) ? " changed" : ""}" transform="translate(${n.px},${n.py})"><rect width="${BW}" height="${BH}"/><text class="op" x="8" y="17">${l.op}</text><text class="d" x="8" y="33">${trunc(l.d, 30)}</text><title>${l.op} ${l.d} · ~${fmtRows(rows(n.n))} rows</title></g>`; }).join("")
+      + (L.nodes.length ? `<text class="rows" x="${L.nodes[0].px + BW + 10}" y="${L.nodes[0].py + 26}">→ ~${fmtRows(rows(plan))} rows out</text>` : ""));
+  }
+  d3.select("#planst").text(view === "physical" ? `${s.last.phys.stages.length} stages · ${s.last.tasks} tasks` : plan ? `${countNodes(plan)} nodes · ~${fmtRows(rows(plan))} rows` : "");
+
+  /* rules, stages, explain */
+  d3.select("#rules").html(s.last ? (s.last.notes.length ? s.last.notes.map(r => `<div class="rule"><div class="n">${r.name}</div><div class="w">${r.why}</div></div>`).join("") : `<div class="none">no rewrites applied — the plan was already in its best shape</div>`) : `<div class="none">runs when you call explain() or an action</div>`);
+  d3.select("#stages").html(s.last ? s.last.phys.stages.map(st => `<div class="stg"><span class="id" style="color:var(--s${st.num % 6})">stage ${st.num}</span><span><span class="t">${st.tasks} task${st.tasks > 1 ? "s" : ""}</span> · ${st.kind} · ${st.what}<div class="bar"><i style="width:${Math.min(100, st.tasks / Math.max(...s.last.phys.stages.map(x => x.tasks)) * 100)}%;background:var(--s${st.num % 6})"></i></div></span></div>`).join("") + `<div class="tot">${s.last.tasks} tasks total · a task = one partition through one stage's pipeline</div>` : `<div class="none">no job planned yet</div>`);
+  d3.select("#conf").html(`<span>shuffle.partitions <b>${s.conf.shufflePartitions}</b></span><span>autoBroadcast <b>${s.conf.autoBroadcast ? "on (≤10MB)" : "off"}</b></span>`);
+  const ex = d3.select("#explain");
+  if (!s.last) { ex.html(`<span class="h">df.explain() prints the same tree Spark would.</span>`); d3.select("#expst").text(""); }
+  else { ex.html(`<span class="h">== Optimized Logical Plan ==</span>\n${esc(text(s.last.optimized))}\n\n<span class="h">== Physical Plan ==</span>\n` + explainText(s.last.phys).map(l => `<span class="${l.cls}">${esc(l.t)}</span>`).join("\n")); d3.select("#expst").text(`${s.last.name}.${s.last.action}()`); }
+}
+const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const trunc = (t, n) => t && t.length > n ? t.slice(0, n - 1) + "…" : (t || "");
+
+/* ============================================================================
+   7. LESSON
+   ========================================================================= */
+const has = (s, k) => !!s.dfs[k];
+const topOp = (s, k) => s.dfs[k]?.plan.op;
+const last = s => s.last;
+
+const LESSON = [
+  { title: "Read a table. Nothing is read",
+    body: `<code>spark.read.parquet</code> returns immediately, with a million-row file untouched.
+    What you get back is a one-node plan: <em>Scan events</em>. The row count is an estimate
+    from the file's metadata. This is the whole idea in miniature: a DataFrame is a plan.`,
+    try: 'events = spark.read.parquet("events")', expect: /^events\s*=\s*spark\.read/,
+    needs: s => !has(s, "events") },
+
+  { title: "And the other table",
+    body: `Users is small: 50k rows, 6 MB. Remember that number.`,
+    try: 'users = spark.read.parquet("users")', expect: /^users\s*=\s*spark\.read/,
+    needs: s => has(s, "events") && !has(s, "users") },
+
+  { title: "Transformations grow the plan",
+    body: `Join them. The plan gets a Join node on top of two scans. The estimate is a million
+    rows — every event has a user. Still nothing has run; the status says lazy.`,
+    try: 'df = events.join(users, "user_id")', expect: /^df\s*=\s*events\.join\(users/,
+    needs: s => has(s, "events") && has(s, "users") && !has(s, "df") },
+
+  { title: "Filter after the join",
+    body: `Write it the naive way: join first, then filter on an events column. In the plan the
+    Filter sits above the Join, which means the join would have to produce a million rows for
+    the filter to throw most of them away. Keep that in mind.`,
+    try: `df = df.filter("country = 'DE'")`, expect: /^df\s*=\s*df\.filter\("country/,
+    needs: s => has(s, "df") && topOp(s, "df") === "Join" },
+
+  { title: "And a filter on the other side",
+    body: `A users column this time. Two filters stacked on top of a join.`,
+    try: `df = df.filter("plan = 'pro'")`, expect: /^df\s*=\s*df\.filter\("plan/,
+    needs: s => has(s, "df") && topOp(s, "df") === "Filter" && s.dfs.df.plan.conds.length === 1 && s.dfs.df.plan.conds[0].col === "country" },
+
+  { title: "Keep two columns",
+    body: `Select just what the answer needs. Note that events has five columns and users four;
+    you're asking for two.`,
+    try: 'df = df.select("plan", "value")', expect: /^df\s*=\s*df\.select\("plan",\s*"value"\)/,
+    needs: s => has(s, "df") && topOp(s, "df") === "Filter" && s.dfs.df.plan.conds[0].col === "plan" },
+
+  { title: "Aggregate",
+    body: `Total value per plan. An Aggregate on top. Six nodes, and the file still hasn't been
+    opened. Read the estimate at the top: three rows out.`,
+    try: 'df = df.groupBy("plan").agg(sum("value"))', expect: /^df\s*=\s*df\.groupBy\("plan"\)\.agg\(sum\("value"\)\)/,
+    needs: s => has(s, "df") && topOp(s, "df") === "Project" },
+
+  { title: "Ask for the plan, not the data",
+    body: `<code>explain()</code> hands the plan to the engine and stops before execution. Watch
+    the plan panel switch to the optimized view: the amber nodes are what Catalyst changed, and
+    the cards on the left say why. Read them top to bottom.`,
+    try: "df.explain()", expect: /^df\.explain\(\)$/,
+    needs: s => has(s, "df") && topOp(s, "df") === "Aggregate" && !last(s) },
+
+  { title: "What just happened to your filters",
+    body: `Both filters moved <em>below</em> the join, and then into the scans themselves as
+    pushed parquet filters. The join now sees ~120k events and ~10k users instead of 1M and 50k.
+    You wrote the slow version; the engine ran the fast one. Column pruning did the same for
+    width: events reads 3 of 5 columns, users 2 of 4. Click "logical" to compare.`,
+    try: "view logical", expect: /^view logical$/,
+    needs: s => last(s) && !last(s).executed && s.view !== "logical" },
+
+  { title: "Now run it",
+    body: `<code>show()</code> is an action. Same optimizer, same plan, but now the physical
+    planner takes over and the job executes. The plan panel switches to physical: coloured
+    bands are stages, the red node is a shuffle.`,
+    try: "df.show()", expect: /^df\.show\(\)$/,
+    needs: s => last(s) && !last(s).executed },
+
+  { title: "Read the stages",
+    body: `Three stages. A broadcast stage that reads users (4 tasks) and ships it to every
+    executor, because 6 MB is under the broadcast threshold — so the join needs no shuffle at
+    all. A stage that scans events, filters, joins, and pre-aggregates in one pipeline (8 tasks,
+    one per file partition). And a final stage that merges the partial sums. Look at its task
+    count.`,
+    try: "view physical", expect: /^view physical$/, readonly: true,
+    needs: s => last(s) && last(s).executed },
+
+  { title: "Two hundred tasks for three rows",
+    body: `<code>spark.sql.shuffle.partitions</code> defaults to 200. Every shuffle produces 200
+    partitions, so the stage after the exchange has 200 tasks — here, to add up three plans.
+    Most of them will be empty. Set it to 8.`,
+    try: "conf shuffle.partitions 8", expect: /^conf shuffle\.partitions 8$/,
+    needs: s => s.conf.shufflePartitions === 200 && last(s) && last(s).executed },
+
+  { title: "…and run again",
+    body: `Same plan, 20 tasks instead of 212.`,
+    try: "df.show()", expect: /^df\.show\(\)$/,
+    needs: s => s.conf.shufflePartitions === 8 && last(s) && last(s).tasks > 100 },
+
+  { title: "Take the broadcast away",
+    body: `Pretend users were too big to copy around. Turn the broadcast off and the join has to
+    become a sort-merge join: both sides shuffled by key so matching rows land on the same
+    partition.`,
+    try: "conf autoBroadcast off", expect: /^conf autoBroadcast off$/,
+    needs: s => s.conf.autoBroadcast && s.conf.shufflePartitions === 8 },
+
+  { title: "…the wall appears",
+    body: `Two more exchanges, two more stages: events and users each scanned and shuffled, then
+    joined and pre-aggregated, then merged. Every red node is data crossing the network. Stages
+    are nothing but the pieces between the walls.`,
+    try: "df.show()", expect: /^df\.show\(\)$/,
+    needs: s => !s.conf.autoBroadcast && last(s) && last(s).phys.stages.length < 4 },
+
+  { title: "Put it back",
+    body: `Broadcast joins are the single biggest cheap win in Spark. Leave the threshold on.`,
+    try: "conf autoBroadcast on", expect: /^conf autoBroadcast on$/,
+    needs: s => !s.conf.autoBroadcast },
+
+  { title: "Free play",
+    body: `<code>help</code> lists the dialect. Try an <code>orderBy</code> (a range shuffle) with
+    a <code>limit</code> (which turns it into TakeOrderedAndProject and removes the shuffle),
+    a <code>select</code> that keeps a column nobody uses, or a filter on the aggregate output
+    and notice it can't be pushed below the groupBy.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   8. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.querySelectorAll("#views .v").forEach(b => b.onclick = () => run(`view ${b.dataset.v}`));
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Spark sandbox loaded. Type 'help', or read a table.", "dim");
+</script>
+</body>
+</html>

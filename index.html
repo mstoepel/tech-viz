@@ -69,7 +69,8 @@ const TOPICS = [
   { id: "k8s",    title: "Orchestration" },
   { id: "db",     title: "Databases" },
   { id: "otel",   title: "Observability" },
-  { id: "ml",     title: "AI systems and machine learning" }
+  { id: "ml",     title: "AI systems and machine learning" },
+  { id: "spark",  title: "Data engineering" }
 ];
 
 const VIZ = [
@@ -109,6 +110,12 @@ const VIZ = [
     blurb: `A fixed schedule destroys the data; one learned function undoes a step. Sample it
             backwards, skip steps, steer it with guidance, and see why a perfect denoiser
             only memorises.` },
+  { topic: "spark", path: "spark/lazy-plans.html", title: "Nothing runs until you ask",
+    blurb: `PySpark plans as trees: transformations grow them, an action hands them to the
+            optimizer and the planner. Pushdown, pruning, exchanges, stages, tasks.` },
+  { topic: "spark", title: "The shuffle", status: "planned",
+    blurb: `Driver, executors, tasks on cores, partitions crossing the network, skew and
+            stragglers, broadcast and cache.` },
   { topic: "ml", path: "ai/post-training.html", title: "Same weights, different wants",
     blurb: `One prompt, seven answers, the real update rules. SFT imitates, a reward model
             learns the labelers' taste, RLHF chases it on a KL leash, and reward hacking
