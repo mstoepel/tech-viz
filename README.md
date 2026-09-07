@@ -23,9 +23,10 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 
 | 01 | Spark | [spark/lazy-plans.html](spark/lazy-plans.html) | Lazy evaluation, the logical plan, a four-rule optimizer (filter merge, predicate pushdown, column pruning, projection collapse), exchanges, stages, tasks, shuffle partitions, broadcast joins |
 
-Planned: Spark 02, the shuffle (driver, executors, tasks on cores, skew, broadcast, cache).
-Candidates after that: DNS resolution, TLS handshake, B-tree indexes, consistent hashing, git
-object store.
+| 02 | Spark | [spark/shuffle.html](spark/shuffle.html) | A tick-driven scheduler: driver, executors and cores, tasks per partition, the timeline, the 200-partition default, adaptive coalescing, broadcast vs sort-merge, skew and the straggler, AQE skew split, caching |
+
+Candidates for the next round: DNS resolution, TLS handshake, B-tree indexes, consistent
+hashing, git object store.
 
 The transformer page is the first numeric-simulation sandbox: the terminal is still there for
 the lesson, but the controls are also clickable and the state is a tiny forward pass rather

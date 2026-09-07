@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The shuffle — a spark sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Stages keep the hues from the plans page. The driver is purple, executor
+   cores are slots, a running task is a bar filling its slot. Shuffle data
+   crossing the network is red; a straggler is the one bar still going.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --drv:#b08be8; --wall:#e06c6c; --ok:#6fbf73; --hot:#e8a33d; --cache:#5cc8d6;
+  --s0:#5cc8d6; --s1:#6fbf73; --s2:#e07aa8; --s3:#c9b458; --s4:#7fa0e8; --s5:#b08be8;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--wall)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--drv);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--drv);color:var(--drv)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--drv);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the cluster — one driver, executors with core slots that
+   tasks fill — and under it the timeline every Spark UI shows: one lane per
+   core, one bar per task, coloured by stage. Skew is the one long bar.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.cap button{padding:2px 8px;font-size:11px;letter-spacing:0;text-transform:none}
+.cap button.hot{border-color:var(--hot);color:var(--hot)}
+.stage{display:grid;grid-template-columns:1fr 290px;gap:12px;align-items:start}
+.cluster{padding:12px}
+.driver{border:1.5px solid var(--drv);border-radius:var(--r);padding:8px 10px;font-family:var(--code);font-size:11px;margin-bottom:10px;background:rgba(176,139,232,.05)}
+.driver .n{font-family:var(--mono);font-weight:700;color:var(--drv);margin-bottom:2px}
+.driver .q{color:var(--ink-dim)} .driver .q b{color:var(--ink);font-weight:400}
+.driver .aqe{color:var(--hot)}
+.execs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.exec{border:1px solid var(--line);border-radius:var(--r);padding:6px 8px;background:var(--bg);font-family:var(--code);font-size:10.5px}
+.exec .n{color:var(--ink-dim);margin-bottom:4px;display:flex;justify-content:space-between}
+.core{height:22px;border:1px dashed var(--line);border-radius:3px;margin-bottom:4px;position:relative;overflow:hidden}
+.core .fill{position:absolute;left:0;top:0;height:100%;opacity:.35;transition:width .25s}
+.core .lbl{position:absolute;left:5px;top:0;line-height:22px;font-size:9.5px;color:var(--ink);white-space:nowrap}
+.core.idle .lbl{color:var(--ink-faint)}
+.core.straggler{border-color:var(--hot);border-style:solid}
+.exec .mem{margin-top:4px;color:var(--ink-faint);display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.exec .mem i{display:inline-block;width:7px;height:7px;border-radius:1px;background:var(--cache)}
+.exec .mem i.sh{background:var(--wall);opacity:.7}
+.stages{padding:8px 12px;font-family:var(--code);font-size:11px;display:flex;flex-direction:column;gap:5px}
+.stg{display:grid;grid-template-columns:62px 1fr;gap:8px;align-items:start;color:var(--ink-dim)}
+.stg .id{font-family:var(--mono);font-weight:700}
+.stg .d{line-height:1.45} .stg .d b{color:var(--ink);font-weight:400}
+.stg.done .id::after{content:" ✓";color:var(--ok)} .stg.run .id::after{content:" ▶";color:var(--hot)}
+.stg .skew{color:var(--hot)}
+.stages .none{color:var(--ink-faint)}
+.tl{padding:8px 12px 4px}
+.tl svg{display:block;width:100%}
+.tl text{font-family:var(--code);font-size:9px;fill:var(--ink-faint)}
+.tl .lane{stroke:rgba(46,58,71,.5)}
+.tl .bar{rx:2;opacity:.85}
+.tl .bar.skipped{opacity:.3}
+.tl .bar.strag{stroke:var(--hot);stroke-width:1.2}
+.tl .now{stroke:var(--hot);stroke-width:1}
+.tl .sb{stroke:var(--wall);stroke-dasharray:3 3}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line)}
+.metrics .k{color:var(--ink-faint);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+.metrics .v{font-family:var(--mono);font-size:15px;font-weight:700;color:var(--ink)}
+.metrics .v.bad{color:var(--hot)} .metrics .v.ok{color:var(--ok)}
+.matrix{padding:8px 12px 10px}
+.matrix svg{display:block;width:100%}
+.matrix text{font-family:var(--code);font-size:8.5px;fill:var(--ink-faint)}
+.matrix .c{fill:var(--wall)}
+.matrix .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.mnote{font-family:var(--code);font-size:10px;color:var(--ink-faint);padding:0 12px 10px;line-height:1.5}
+.knobs{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-faint);border-top:1px solid var(--line);display:flex;gap:6px 12px;flex-wrap:wrap}
+.knobs b{color:var(--ink-dim);font-weight:400} .knobs b.on{color:var(--ok)} .knobs b.warn{color:var(--hot)}
+.runs{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line);display:flex;flex-direction:column;gap:3px}
+.runs .r{display:grid;grid-template-columns:52px 1fr 40px;gap:6px;align-items:center}
+.runs .r .b{height:6px;background:var(--panel-2);border-radius:2px;overflow:hidden}
+.runs .r .b i{display:block;height:100%;background:var(--drv)}
+.runs .r .t{text-align:right;color:var(--ink)}
+.runs .none{color:var(--ink-faint)}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--drv)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .add{color:var(--ok)} .log .mod{color:var(--hot)} .log .err{color:var(--wall)} .log .d{color:var(--drv)} .log .c{color:var(--cache)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--drv)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:820px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 02 · Data engineering</p>
+  <h1>A stage is as slow as its <em>slowest task</em></h1>
+  <p class="standfirst">The driver turns each stage into tasks, one per partition, and hands them
+  to whatever executor cores are free. A stage ends when its last task ends; the next stage
+  can't start until then, because its input is the shuffle files the previous one wrote. Every
+  slow Spark job is one of three things: too many tasks, too few, or one that's much bigger
+  than the others. Set up a job, then step the scheduler.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>The cluster</span><span><button id="tickbtn">tick</button> <button id="runbtn">run</button> <span class="st" id="clk"></span></span></div>
+      <div class="cluster">
+        <div class="driver" id="driver"></div>
+        <div class="execs" id="execs"></div>
+      </div>
+      <div class="cap"><span>Timeline · one lane per core, one bar per task</span><span class="st" id="tlst"></span></div>
+      <div class="tl" id="tl"><svg id="tlsvg"></svg></div>
+      <div class="metrics" id="metrics"></div>
+    </div>
+    <div class="side" style="display:flex;flex-direction:column;gap:12px">
+      <div class="box">
+        <div class="cap"><span>Stages</span><span class="st" id="jobst"></span></div>
+        <div class="stages" id="stages"></div>
+        <div class="knobs" id="knobs"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>The shuffle · map task × reduce partition</span></div>
+        <div class="matrix" id="matrix"></div>
+        <div class="mnote" id="mnote"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>Runs</span></div>
+        <div class="runs" id="runs"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="job groupby">
+    </div>
+  </div>
+  <p class="hintbar"><code>job groupby|join|filter</code> · <code>tick</code> · <code>run</code> · <code>conf shuffle.partitions 8</code> ·
+  <code>skew on</code> · <code>aqe on</code> · <code>broadcast off</code> · <code>cache on</code> · <code>cluster 6 2</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes, with a tick clock. A tick
+    is a unit of work: a task takes one tick of overhead plus one per 25k rows it touches (two
+    total when reading a cached partition). The scheduler is FIFO by stage then task, stages run
+    as soon as their inputs exist, and independent stages run concurrently. Skew puts 40% of
+    the join key on one value. Adaptive execution re-plans a shuffle-consuming stage from the
+    actual map output sizes: it coalesces partitions below 125k rows and splits any partition
+    over twice that, which is how Spark 3 handles both the 200-partition default and skewed
+    joins. Sizes are rows, not bytes; the shapes are what matter.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. STATE + JOB PLANNING
+   ========================================================================= */
+const ROWS = 1e6, USERS = 5e4, RATE = 25000, TARGET = 125000;
+function initialState() {
+  return { conf: { P: 8, R: 200, E: 3, C: 2, skew: false, broadcast: true, aqe: false, cache: false },
+           job: null, t: 0, materialized: false, runs: [] };
+}
+const clone = s => structuredClone(s);
+const dur = (rows, cached) => cached ? 2 : 1 + Math.ceil(rows / RATE);
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(Math.round(n));
+const median = a => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; };
+
+/* how each map task's output spreads over reduce partitions */
+function spread(kind, mapRows, R, skew) {
+  const out = Array(R).fill(0);
+  if (kind === "groupby") { const groups = 40; for (let g = 0; g < groups; g++) out[(g * 7919) % R] += 1; return out; }   /* map-side combine: ≤40 rows per task */
+  const hot = 13 % R, hotShare = skew ? 0.4 : 0;
+  const rest = mapRows * (1 - hotShare);
+  for (let r = 0; r < R; r++) out[r] += rest / R;
+  out[hot] += mapRows * hotShare;
+  return out;
+}
+
+function planJob(s, name) {
+  const c = s.conf, stages = [];
+  const mapRows = ROWS / c.P;
+  const cached = c.cache && s.materialized;
+  const scanTasks = (sid, rows, n, what) => Array.from({ length: n }, (_, i) => ({ id: `${sid}.${i}`, part: i, rows, dur: dur(rows, cached && what === "events"), cached: cached && what === "events", state: "waiting", note: `${what} partition ${i}` }));
+  if (name === "filter") {
+    stages.push({ id: 0, name: "scan + filter events", kind: "map", deps: [], tasks: scanTasks(0, mapRows, c.P, "events") });
+  } else if (name === "groupby") {
+    stages.push({ id: 0, name: "scan events + partial groupBy(country)", kind: "map", deps: [], tasks: scanTasks(0, mapRows, c.P, "events"), shuffle: { kind: "groupby", R: c.R } });
+    stages.push({ id: 1, name: "final groupBy(country)", kind: "reduce", deps: [0], from: 0, tasks: null });
+  } else if (name === "join") {
+    if (c.broadcast) {
+      stages.push({ id: 0, name: "scan users → broadcast", kind: "broadcast", deps: [], tasks: scanTasks(0, USERS / 4, 4, "users") });
+      stages.push({ id: 1, name: "scan events + broadcast hash join", kind: "map", deps: [0], tasks: scanTasks(1, mapRows, c.P, "events") });
+    } else {
+      stages.push({ id: 0, name: "scan events → shuffle by user_id", kind: "map", deps: [], tasks: scanTasks(0, mapRows, c.P, "events"), shuffle: { kind: "join", R: c.R } });
+      stages.push({ id: 1, name: "scan users → shuffle by user_id", kind: "map", deps: [], tasks: scanTasks(1, USERS / 4, 4, "users"), shuffle: { kind: "joinsmall", R: c.R } });
+      stages.push({ id: 2, name: "sort-merge join", kind: "reduce", deps: [0, 1], from: 0, tasks: null });
+    }
+  }
+  return { name, stages, log: [], done: false, started: false };
+}
+
+/* the reduce side is planned when its inputs exist — that is exactly when AQE can look */
+function planReduce(s, job, st) {
+  const c = s.conf, src = job.stages[st.from], sh = src.shuffle;
+  const R = sh.R, parts = Array(R).fill(0);
+  src.tasks.forEach(t => spread(sh.kind, t.rows, R, c.skew).forEach((v, r) => parts[r] += v));
+  st.partsRows = parts;
+  const notes = [];
+  let tasks;
+  if (!c.aqe) {
+    tasks = parts.map((rows, r) => ({ id: `${st.id}.${r}`, part: r, rows, dur: dur(rows), state: "waiting", note: `reduce partition ${r}` }));
+  } else {
+    tasks = [];
+    let acc = [], accRows = 0, coalesced = 0, split = 0;
+    const flush = () => { if (!acc.length) return; tasks.push({ id: `${st.id}.${tasks.length}`, part: acc.length > 1 ? `${acc[0]}–${acc[acc.length - 1]}` : acc[0], rows: accRows, dur: dur(accRows), state: "waiting", note: acc.length > 1 ? `coalesced partitions ${acc[0]}–${acc[acc.length - 1]}` : `reduce partition ${acc[0]}` }); if (acc.length > 1) coalesced += acc.length; acc = []; accRows = 0; };
+    const med = median(parts);
+    parts.forEach((rows, r) => {
+      if (rows > 2 * TARGET && rows > 4 * med) { flush(); const n = Math.ceil(rows / TARGET); for (let k = 0; k < n; k++) tasks.push({ id: `${st.id}.${tasks.length}`, part: `${r}/${k + 1}`, rows: rows / n, dur: dur(rows / n), state: "waiting", note: `skewed partition ${r}, chunk ${k + 1}/${n} (build side replicated)` }); split++; return; }
+      acc.push(r); accRows += rows; if (accRows >= TARGET) flush();
+    });
+    flush();
+    if (coalesced) notes.push(`AQE: coalesced ${coalesced} small partitions — ${R} → ${tasks.length} tasks`);
+    if (split) notes.push(`AQE: split ${split} skewed partition(s) into ${TARGET / 1000}k-row chunks`);
+    if (!coalesced && !split) notes.push(`AQE: partitions already well sized, nothing to change`);
+  }
+  st.tasks = tasks; st.aqeNotes = notes;
+  return notes;
+}
+
+/* ============================================================================
+   2. THE SCHEDULER — one tick
+   ========================================================================= */
+function tick(s) {
+  const job = s.job, c = s.conf, out = [];
+  if (!job || job.done) return out;
+  job.started = true;
+  /* finish running tasks */
+  job.stages.forEach(st => (st.tasks || []).forEach(t => { if (t.state === "running" && s.t >= t.end) { t.state = "done"; } }));
+  /* stages whose inputs are complete */
+  const complete = st => st.tasks && st.tasks.every(t => t.state === "done");
+  job.stages.forEach(st => {
+    if (st.tasks === null && st.deps.every(d => complete(job.stages[d]))) { const notes = planReduce(s, job, st); notes.forEach(n => out.push({ text: n, cls: "mod" })); out.push({ text: `driver: stage ${st.id} inputs ready — ${st.tasks.length} task(s) submitted`, cls: "d" }); }
+  });
+  /* free cores → waiting tasks, stage order then task order */
+  const cores = []; for (let e = 0; e < c.E; e++) for (let k = 0; k < c.C; k++) cores.push({ e, k });
+  const busy = new Set(job.stages.flatMap(st => (st.tasks || []).filter(t => t.state === "running").map(t => `${t.exec}.${t.core}`)));
+  const free = cores.filter(cr => !busy.has(`${cr.e}.${cr.k}`));
+  const runnable = job.stages.filter(st => st.tasks && st.deps.every(d => complete(job.stages[d])));
+  const waiting = runnable.flatMap(st => st.tasks.filter(t => t.state === "waiting").map(t => ({ t, st })));
+  let launched = 0;
+  for (const cr of free) { const w = waiting.shift(); if (!w) break; w.t.state = "running"; w.t.exec = cr.e; w.t.core = cr.k; w.t.start = s.t; w.t.end = s.t + w.t.dur; launched++; }
+  if (launched) out.push({ text: `t=${s.t}: launched ${launched} task(s) on free cores${waiting.length ? `, ${waiting.length} still waiting for a core` : ""}`, cls: "ok" });
+  s.t++;
+  job.stages.forEach(st => { if (st.tasks && complete(st) && !st.doneAt) { st.doneAt = s.t; out.push({ text: `stage ${st.id} complete at t=${s.t}${st.shuffle ? " — shuffle files written on each executor" : ""}`, cls: "add" }); } });
+  if (job.stages.every(complete)) {
+    job.done = true; job.total = Math.max(...job.stages.map(st => st.doneAt));
+    if (c.cache && job.stages.some(st => st.tasks.some(t => t.note.startsWith("events")))) s.materialized = true;
+    s.runs.push({ name: job.name, total: job.total, tasks: job.stages.reduce((a, st) => a + st.tasks.length, 0), conf: { ...c } });
+    out.push({ text: `job done in ${job.total} ticks`, cls: "add" });
+  }
+  return out;
+}
+
+/* ============================================================================
+   3. COMMANDS
+   ========================================================================= */
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const stageSummary = (job) => job.stages.map(st => `stage ${st.id}: ${st.tasks ? st.tasks.length + " tasks" : "planned when inputs exist"} — ${st.name}`);
+
+const REGISTRY = {
+  "job": (s, args) => { const name = args[0]; if (!/^(groupby|join|filter)$/.test(name || "")) return fail("job groupby | join | filter");
+    const n = clone(s); n.job = planJob(n, name); n.t = 0;
+    return { state: n, out: [line(`job ${name} planned: ${n.job.stages.length} stage(s). Nothing is running — tick or run.`, "d"), ...stageSummary(n.job).map(t => line("  " + t, "ok"))] }; },
+  "tick": (s, args) => { if (!s.job) return fail("no job — try: job groupby"); if (s.job.done) return { out: [line("job already finished — plan another or run again", "dim")] };
+    const n = clone(s), times = Math.min(50, Math.max(1, +args[0] || 1)); const out = []; for (let i = 0; i < times && !n.job.done; i++) out.push(...tick(n)); return { state: n, out }; },
+  "run": (s) => { if (!s.job) return fail("no job — try: job groupby");
+    const n = clone(s); if (n.job.done) { n.job = planJob(n, n.job.name); n.t = 0; }
+    const out = []; let guard = 0; while (!n.job.done && guard++ < 2000) out.push(...tick(n));
+    const keep = out.filter(o => o.cls !== "ok"); return { state: n, out: keep.length > 14 ? [...keep.slice(0, 4), line(`  … ${keep.length - 8} lines …`, "dim"), ...keep.slice(-4)] : keep }; },
+  "conf": (s, args) => { const [k, v] = args; if (!/shuffle/.test(k || "") || !(+v >= 1 && +v <= 1000)) return fail("conf shuffle.partitions N"); const n = clone(s); n.conf.R = +v; if (n.job && !n.job.started) n.job = planJob(n, n.job.name);
+    return { state: n, out: [line(`shuffle.partitions = ${v}`, "mod"), line("applies to the next job's shuffles", "dim")] }; },
+  "partitions": (s, args) => { const p = +args[0]; if (!(p >= 1 && p <= 64)) return fail("partitions 1–64"); const n = clone(s); n.conf.P = p; n.materialized = false; if (n.job) n.job = planJob(n, n.job.name); return { state: n, out: [line(`events now has ${p} input partitions (${fmt(ROWS / p)} rows each)`, "mod")] }; },
+  "cluster": (s, args) => { const E = +args[0], C = +args[1]; if (!(E >= 1 && E <= 8 && C >= 1 && C <= 8)) return fail("cluster <executors 1–8> <cores 1–8>"); const n = clone(s); n.conf.E = E; n.conf.C = C; n.materialized = false; if (n.job) { n.job = planJob(n, n.job.name); n.t = 0; }
+    return { state: n, out: [line(`${E} executors × ${C} cores = ${E * C} tasks at a time`, "d")] }; },
+  "skew": (s, args) => toggle(s, args, "skew", v => v ? "40% of events now belong to one user_id (a bot). Watch what happens to the join." : "keys evenly distributed again"),
+  "aqe": (s, args) => toggle(s, args, "aqe", v => v ? "adaptive query execution on: reduce stages are re-planned from real shuffle sizes" : "adaptive execution off: shuffle.partitions is taken literally"),
+  "broadcast": (s, args) => toggle(s, args, "broadcast", v => v ? "small join sides are broadcast: no shuffle for the join" : "every join is a sort-merge join: both sides shuffled by key"),
+  "cache": (s, args) => toggle(s, args, "cache", v => v ? "events.cache(): the next job that scans it keeps the partitions in executor memory" : "cache dropped", true),
+  "help": () => ({ out: [
+    line("job groupby|join|filter        plan a job (stages + tasks); nothing runs", "d"),
+    line("tick [n] · run                  step the scheduler / run to completion", "ok"),
+    line("conf shuffle.partitions N       reduce-side partition count (default 200)", "ok"),
+    line("partitions N · cluster E C      input partitions · executors × cores", "ok"),
+    line("skew on|off · aqe on|off · broadcast on|off · cache on|off", "mod"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function toggle(s, args, key, msg, dropsCache) {
+  if (!/^(on|off)$/.test(args[0] || "")) return fail(`${key} on|off`);
+  const n = clone(s); n.conf[key] = args[0] === "on"; if (dropsCache && !n.conf[key]) n.materialized = false;
+  if (n.job && !n.job.started) n.job = planJob(n, n.job.name);
+  return { state: n, out: [line(msg(n.conf[key]), key === "cache" ? "c" : "mod")] };
+}
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase(); if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1).map(x => x.toLowerCase()), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   4. RENDERER
+   ========================================================================= */
+const sc = i => `var(--s${i % 6})`;
+function render(s) {
+  const c = s.conf, job = s.job;
+  d3.select("#clk").text(`t = ${s.t}`);
+  d3.select("#tickbtn").classed("hot", job && !job.done); d3.select("#runbtn").classed("hot", job && !job.done);
+  /* driver */
+  const complete = st => st.tasks && st.tasks.every(t => t.state === "done");
+  const drv = d3.select("#driver");
+  if (!job) drv.html(`<div class="n">driver</div><div class="q">no job. The driver is where your PySpark code runs; it never touches the data — it only makes and schedules tasks.</div>`);
+  else { const waiting = job.stages.flatMap(st => (st.tasks || []).filter(t => t.state === "waiting")).length, running = job.stages.flatMap(st => (st.tasks || []).filter(t => t.state === "running")).length, done = job.stages.flatMap(st => (st.tasks || []).filter(t => t.state === "done")).length;
+    drv.html(`<div class="n">driver · DAGScheduler</div><div class="q">job <b>${job.name}</b> · ${job.stages.length} stages · <b>${running}</b> running · <b>${waiting}</b> waiting for a core · <b>${done}</b> done${job.done ? ` · <b style="color:var(--ok)">finished in ${job.total} ticks</b>` : ""}</div>${job.stages.flatMap(st => st.aqeNotes || []).map(n => `<div class="aqe">${n}</div>`).join("")}`); }
+  /* executors */
+  const execs = [];
+  for (let e = 0; e < c.E; e++) {
+    const cores = [];
+    for (let k = 0; k < c.C; k++) {
+      const t = job ? job.stages.flatMap(st => (st.tasks || []).map(x => ({ x, st }))).find(({ x }) => x.state === "running" && x.exec === e && x.core === k) : null;
+      if (!t) cores.push(`<div class="core idle"><span class="lbl">core ${k} · idle</span></div>`);
+      else { const p = Math.min(1, (s.t - t.x.start) / t.x.dur); const strag = t.x.dur > 2 * median(t.st.tasks.map(y => y.dur)) && t.st.tasks.length > 2;
+        cores.push(`<div class="core${strag ? " straggler" : ""}"><div class="fill" style="width:${p * 100}%;background:${sc(t.st.id)}"></div><span class="lbl">s${t.st.id} t${t.x.id.split(".")[1]} · ${fmt(t.x.rows)} rows · ${s.t - t.x.start}/${t.x.dur}${t.x.cached ? " · mem" : ""}</span></div>`); }
+    }
+    const cachedHere = job && s.materialized && c.cache ? Math.ceil(c.P / c.E) : 0;
+    const shuffled = job ? job.stages.filter(st => st.shuffle && st.tasks).flatMap(st => st.tasks.filter(t => t.state === "done" && t.exec === e)).length : 0;
+    execs.push(`<div class="exec"><div class="n"><span>executor ${e}</span><span>${c.C} cores</span></div>${cores.join("")}<div class="mem">${cachedHere ? `${"<i></i>".repeat(Math.min(8, cachedHere))} cached` : ""}${shuffled ? ` ${"<i class=sh></i>".repeat(Math.min(8, shuffled))} shuffle files` : ""}${!cachedHere && !shuffled ? "memory: nothing pinned" : ""}</div></div>`);
+  }
+  d3.select("#execs").html(execs.join(""));
+  /* stages */
+  const stg = d3.select("#stages");
+  if (!job) stg.html(`<div class="none">plan a job: <b>job groupby</b></div>`);
+  else stg.html(job.stages.map(st => { const ts = st.tasks || []; const durs = ts.map(t => t.dur); const mx = Math.max(...durs, 0), md = median(durs); const skewed = ts.length > 2 && mx > 2 * md;
+    return `<div class="stg ${complete(st) ? "done" : ts.some(t => t.state === "running") ? "run" : ""}"><span class="id" style="color:${sc(st.id)}">stage ${st.id}</span><div class="d">${st.name}<br><b>${st.tasks ? `${ts.length} task${ts.length !== 1 ? "s" : ""}` : "not planned yet"}</b>${st.tasks ? ` · longest ${mx}, median ${md} ticks` : ""}${st.shuffle ? ` · shuffle → ${st.shuffle.R} partitions` : ""}${skewed ? `<br><span class="skew">⚠ skew: one task is ${(mx / Math.max(1, md)).toFixed(0)}× the median</span>` : ""}${st.doneAt ? ` · done t=${st.doneAt}` : ""}</div></div>`; }).join(""));
+  d3.select("#jobst").text(job ? `${job.name} · ${job.done ? "finished" : job.started ? "running" : "planned"}` : "");
+  d3.select("#knobs").html(`<span>partitions <b>${c.P}</b></span><span>shuffle.partitions <b class="${c.R >= 100 ? "warn" : ""}">${c.R}</b></span><span>cluster <b>${c.E}×${c.C}</b></span><span>skew <b class="${c.skew ? "warn" : ""}">${c.skew ? "on" : "off"}</b></span><span>aqe <b class="${c.aqe ? "on" : ""}">${c.aqe ? "on" : "off"}</b></span><span>broadcast <b class="${c.broadcast ? "on" : ""}">${c.broadcast ? "on" : "off"}</b></span><span>cache <b class="${c.cache ? "on" : ""}">${c.cache ? (s.materialized ? "on · materialized" : "on · not yet") : "off"}</b></span>`);
+
+  /* timeline */
+  const svg = d3.select("#tlsvg");
+  const lanes = c.E * c.C, LH = 14, W = 700, left = 48, top = 14;
+  const H = top + lanes * LH + 22;
+  svg.attr("viewBox", `0 0 ${W} ${H}`).attr("height", H);
+  if (!job || !job.started) { svg.html(`<text x="${left}" y="${top + 12}">tasks appear here as the scheduler places them</text>`); d3.select("#tlst").text(""); }
+  else {
+    const tasks = job.stages.flatMap(st => (st.tasks || []).filter(t => t.state !== "waiting").map(t => ({ t, st })));
+    const tmax = Math.max(s.t, ...tasks.map(({ t }) => t.end || s.t), 10);
+    const x = v => left + v / tmax * (W - left - 8);
+    const rows = [];
+    for (let e = 0; e < c.E; e++) for (let k = 0; k < c.C; k++) rows.push(`<line class="lane" x1="${left}" x2="${W - 8}" y1="${top + (e * c.C + k) * LH + LH / 2}" y2="${top + (e * c.C + k) * LH + LH / 2}"/><text x="2" y="${top + (e * c.C + k) * LH + LH / 2 + 3}">e${e}·c${k}</text>`);
+    const bars = tasks.map(({ t, st }) => { const md = median(st.tasks.map(y => y.dur)); const strag = st.tasks.length > 2 && t.dur > 2 * md; const end = t.state === "done" ? t.end : Math.min(t.end, s.t);
+      return `<rect class="bar${strag ? " strag" : ""}${t.cached ? " cached" : ""}" x="${x(t.start)}" y="${top + (t.exec * c.C + t.core) * LH + 2}" width="${Math.max(1.5, x(end) - x(t.start))}" height="${LH - 4}" fill="${sc(st.id)}"><title>stage ${st.id} task ${t.id}: ${t.note}, ${fmt(t.rows)} rows, ${t.dur} ticks</title></rect>`; });
+    const sb = job.stages.filter(st => st.doneAt && st.shuffle).map(st => `<line class="sb" x1="${x(st.doneAt)}" x2="${x(st.doneAt)}" y1="${top}" y2="${top + lanes * LH}"/><text x="${x(st.doneAt) + 2}" y="${top + lanes * LH + 9}" fill="#e06c6c">shuffle</text>`);
+    svg.html(rows.join("") + bars.join("") + sb.join("") + `<line class="now" x1="${x(s.t)}" x2="${x(s.t)}" y1="${top - 4}" y2="${top + lanes * LH}"/><text x="${left}" y="${top + lanes * LH + 18}">0</text><text x="${W - 8}" y="${top + lanes * LH + 18}" text-anchor="end">${tmax} ticks</text>`);
+    d3.select("#tlst").text(`${tasks.length} task(s) placed`);
+  }
+  /* metrics */
+  const m = d3.select("#metrics");
+  if (!job || !job.started) m.html("");
+  else { const all = job.stages.flatMap(st => st.tasks || []); const busyTicks = all.filter(t => t.state === "done").reduce((a, t) => a + t.dur, 0); const util = job.done ? busyTicks / (job.total * lanes) : null;
+    const red = job.stages.filter(st => st.kind === "reduce" && st.tasks); const mx = red.length ? Math.max(...red.flatMap(st => st.tasks.map(t => t.dur))) : 0, md = red.length ? median(red.flatMap(st => st.tasks.map(t => t.dur))) : 0;
+    m.html(`<div><div class="k">elapsed</div><div class="v">${job.done ? job.total : s.t}${job.done ? "" : "…"}</div></div><div><div class="k">tasks</div><div class="v">${all.length}</div></div><div><div class="k">core utilisation</div><div class="v ${util !== null && util < 0.5 ? "bad" : util !== null && util > 0.8 ? "ok" : ""}">${util === null ? "—" : Math.round(util * 100) + "%"}</div></div><div><div class="k">reduce max / median</div><div class="v ${mx > 2 * md && md ? "bad" : ""}">${red.length ? `${mx} / ${md}` : "—"}</div></div>`); }
+  /* matrix */
+  const mx = d3.select("#matrix"), src = job && job.stages.find(st => st.shuffle && st.tasks && job.stages.some(r => r.from === st.id && r.partsRows));
+  if (!src) { mx.html(`<div class="none">${job && job.stages.some(st => st.shuffle) ? "drawn once the map stage has written its shuffle files" : "this job has no shuffle"}</div>`); d3.select("#mnote").text(""); }
+  else { const red = job.stages.find(r => r.from === src.id); const R = src.shuffle.R, M = src.tasks.length; const show = Math.min(R, 40); const cw = Math.floor(276 / show), ch = 9; const maxv = Math.max(...red.partsRows);
+    const cells = []; src.tasks.forEach((t, i) => { const row = spread(src.shuffle.kind, t.rows, R, c.skew); for (let r = 0; r < show; r++) { const v = row[r]; cells.push(`<rect class="c" x="${r * cw}" y="${i * ch}" width="${cw - 1}" height="${ch - 1}" opacity="${v ? 0.12 + 0.88 * Math.min(1, v / (maxv / M)) : 0.03}"><title>map ${i} → partition ${r}: ${fmt(v)} rows</title></rect>`); } });
+    mx.html(`<svg viewBox="0 0 ${show * cw} ${M * ch + 12}" style="height:${M * ch + 12}px"><g>${cells.join("")}</g><text x="0" y="${M * ch + 10}">reduce partitions 0–${show - 1}${R > show ? ` of ${R}` : ""} →   rows: ${M} map tasks</text></svg>`);
+    const hot = red.partsRows.indexOf(maxv);
+    d3.select("#mnote").text(`${fmt(red.partsRows.reduce((a, b) => a + b, 0))} rows cross the network · largest partition ${hot} holds ${fmt(maxv)} (${Math.round(maxv / red.partsRows.reduce((a, b) => a + b, 0) * 100)}%) · median ${fmt(median(red.partsRows))}`); }
+  /* runs */
+  const rs = d3.select("#runs"); const maxT = Math.max(1, ...s.runs.map(r => r.total));
+  rs.html(s.runs.length ? s.runs.map((r, i) => `<div class="r"><span>#${i + 1} ${r.name}</span><div class="b"><i style="width:${r.total / maxT * 100}%"></i></div><span class="t">${r.total}</span></div>`).join("") : `<div class="none">finished jobs line up here for comparison</div>`);
+}
+
+/* ============================================================================
+   5. LESSON
+   ========================================================================= */
+const J = s => s.job;
+const jobIs = (s, n) => J(s) && J(s).name === n;
+const lastRun = s => s.runs[s.runs.length - 1];
+
+const LESSON = [
+  { title: "Plan a job",
+    body: `A groupBy on a million rows in 8 partitions. Two stages: a map stage that scans and
+    pre-aggregates each partition, and a reduce stage after the shuffle. The reduce stage
+    isn't even planned yet — its tasks can't exist until the map stage's shuffle files do.
+    Nothing is running. The driver is holding a plan.`,
+    try: "job groupby", expect: /^job groupby$/,
+    needs: s => !J(s) },
+
+  { title: "One tick",
+    body: `The driver has 8 tasks and 6 cores. Six start, two wait. A task is one partition
+    going through one stage's pipeline, and the number of tasks that can run at once is the
+    number of cores — nothing else.`,
+    try: "tick", expect: /^tick$/,
+    needs: s => jobIs(s, "groupby") && !J(s).started },
+
+  { title: "Run it to the end",
+    body: `Watch the timeline. The map stage takes two waves (8 tasks, 6 cores): twelve ticks
+    to read a million rows. Then the reduce stage: 200 tasks of almost nothing, a tick or two
+    each, over thirty waves. The job spends three quarters of its life adding up forty
+    numbers, because <code>shuffle.partitions</code> defaults to 200 and every task costs a
+    tick of overhead regardless of size.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "groupby") && !J(s).done && s.conf.R === 200 && !s.conf.aqe },
+
+  { title: "Look at the shuffle",
+    body: `The matrix: 8 map tasks by 200 reduce partitions, almost entirely empty, because
+    map-side combining already shrank each task's output to at most 40 rows. Tiny data,
+    huge task count. This is the "too many tasks" failure.`,
+    try: "conf shuffle.partitions 8", expect: /^conf shuffle\.partitions 8$/,
+    needs: s => jobIs(s, "groupby") && J(s).done && s.conf.R === 200 },
+
+  { title: "…and again",
+    body: `Eight reduce tasks, one wave. Compare the two runs at the bottom right.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "groupby") && s.conf.R === 8 && lastRun(s) && lastRun(s).conf.R !== 8 },
+
+  { title: "Let the driver decide",
+    body: `Set it back to 200 and turn on adaptive execution. Now the reduce stage is planned
+    <em>after</em> the map stage finishes, from the real sizes of the shuffle files.`,
+    try: "conf shuffle.partitions 200", expect: /^conf shuffle\.partitions 200$/,
+    needs: s => s.conf.R === 8 && !s.conf.aqe },
+
+  { title: "…aqe on",
+    body: `Spark 3's default. Keep it on.`,
+    try: "aqe on", expect: /^aqe on$/,
+    needs: s => s.conf.R === 200 && !s.conf.aqe },
+
+  { title: "…run",
+    body: `The driver coalesces 200 near-empty partitions into one task. Same code, same
+    setting, a different plan — chosen at the shuffle boundary, which is the only place the
+    driver ever gets to see real numbers.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "groupby") && s.conf.aqe && s.conf.R === 200 && (!lastRun(s) || !lastRun(s).conf.aqe) },
+
+  { title: "A join, the cheap way",
+    body: `Users is small, so the join broadcasts it: a tiny stage ships the whole table to
+    every executor, and the events stage joins locally. No shuffle at all — no matrix, no red
+    line on the timeline.`,
+    try: "job join", expect: /^job join$/,
+    needs: s => !jobIs(s, "join") && s.conf.broadcast && s.conf.aqe },
+
+  { title: "…run",
+    body: `Two stages, fifteen ticks. The broadcast stage is four tiny tasks; everything else
+    is reading events.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "join") && !J(s).done && s.conf.broadcast },
+
+  { title: "Now make it expensive",
+    body: `Pretend users were too big to broadcast. Both tables get shuffled by key so that
+    matching rows meet on the same partition.`,
+    try: "broadcast off", expect: /^broadcast off$/,
+    needs: s => s.conf.broadcast && jobIs(s, "join") },
+
+  { title: "…run",
+    body: `Three stages. The two scans run concurrently (independent stages can), then the
+    join waits for both shuffles. AQE keeps the reduce side sane. Now for the real problem.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "join") && !s.conf.broadcast && (!J(s).done || J(s).stages.length < 3) },
+
+  { title: "Skew",
+    body: `Give one user 40% of all events — a bot, a null key, a default value, it happens in
+    every real dataset. Turn adaptive execution off first so you can see the damage.`,
+    try: "skew on", expect: /^skew on$/,
+    needs: s => !s.conf.skew && !s.conf.broadcast },
+
+  { title: "…aqe off",
+    body: `Plain Spark 2 behaviour.`,
+    try: "aqe off", expect: /^aqe off$/,
+    needs: s => s.conf.skew && s.conf.aqe },
+
+  { title: "…and a sane partition count",
+    body: `Without AQE the 200 default is back. Set it to 8 by hand, so that the only thing
+    wrong with this job is the one big key.`,
+    try: "conf shuffle.partitions 8", expect: /^conf shuffle\.partitions 8$/,
+    needs: s => s.conf.skew && !s.conf.aqe && s.conf.R !== 8 },
+
+  { title: "…run: the straggler",
+    body: `Eight reduce tasks. Seven hold ~75k rows and finish in four ticks. One holds ~475k
+    and runs for twenty. Look at the timeline: five cores idle, one bar still going, the
+    whole job waiting on it. Core utilisation collapses. This is the shape of nearly every
+    "Spark is slow" ticket, and no amount of extra cores fixes it.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "join") && s.conf.skew && !s.conf.aqe && s.conf.R === 8 && (!J(s).done || !lastRun(s) || !lastRun(s).conf.skew || lastRun(s).conf.aqe) },
+
+  { title: "Let the driver split it",
+    body: `Adaptive execution sees the one huge partition in the shuffle files and splits it
+    into chunks, each joining against its own copy of the matching build-side rows.`,
+    try: "aqe on", expect: /^aqe on$/,
+    needs: s => s.conf.skew && !s.conf.aqe },
+
+  { title: "…run",
+    body: `The big partition becomes four chunks of ~120k rows; the small ones are merged in
+    pairs. Balanced bars, busy cores, a fraction of the time. Before AQE you did this by hand
+    with salting; the mechanism is the same — turn the one big key into several.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "join") && s.conf.skew && s.conf.aqe && (!lastRun(s) || !lastRun(s).conf.aqe || !lastRun(s).conf.skew) },
+
+  { title: "Caching",
+    body: `Reset the knobs and mark events as cached. Caching does nothing by itself: the
+    partitions are pinned in executor memory the first time a job computes them.`,
+    try: "skew off", expect: /^skew off$/,
+    needs: s => s.conf.skew },
+
+  { title: "…broadcast back on",
+    body: `Cheap joins again.`,
+    try: "broadcast on", expect: /^broadcast on$/,
+    needs: s => !s.conf.broadcast },
+
+  { title: "…cache on",
+    body: `The knob says "not yet".`,
+    try: "cache on", expect: /^cache on$/,
+    needs: s => !s.conf.cache && s.conf.broadcast && !s.conf.skew },
+
+  { title: "First job pays",
+    body: `A plain filter job. Tasks read from disk at the usual six ticks, and on the way
+    through they leave their partition in memory — the cyan blocks under each executor.`,
+    try: "job filter", expect: /^job filter$/,
+    needs: s => s.conf.cache && !s.materialized && !jobIs(s, "filter") },
+
+  { title: "…run",
+    body: `Six ticks per task, as before.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "filter") && s.conf.cache && !s.materialized },
+
+  { title: "Second job reads memory",
+    body: `Same job. Two ticks per task. Every later action on this DataFrame skips the disk;
+    that is the entire value of <code>cache()</code>, and the entire cost is the executor
+    memory it occupies.`,
+    try: "run", expect: /^run$/,
+    needs: s => jobIs(s, "filter") && s.conf.cache && s.materialized && J(s).done && !J(s).stages[0].tasks[0].cached },
+
+  { title: "More cores",
+    body: `Double the executors. The map stage halves; a stage's wall time is its waves times
+    its slowest task, and waves are tasks divided by cores. Skew doesn't care how many cores
+    you buy — the straggler is one task on one core regardless.`,
+    try: "cluster 6 2", expect: /^cluster 6 2$/,
+    needs: s => s.conf.E === 3 },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>partitions 2</code> to see four cores
+    do nothing (too few tasks), <code>cluster 1 1</code> for a serial job, or skew with
+    broadcast on and notice it doesn't matter — nothing is shuffled by the hot key.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   6. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("tickbtn").onclick = () => run("tick");
+document.getElementById("runbtn").onclick = () => run("run");
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Shuffle sandbox loaded. Type 'help', or: job groupby", "dim");
+</script>
+</body>
+</html>
