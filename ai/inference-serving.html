@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The GPU is waiting on memory — an inference serving sandbox</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<style>
+/* ============================================================================
+   TOKENS
+   Each request keeps one hue from arrival to completion, so you can follow it
+   through the queue, the batch slots and the KV cache. Amber is the GPU's own
+   fixed cost; red is waste — an empty slot, a reserved-but-unused block, a
+   preemption.
+   ========================================================================= */
+:root{
+  --bg:#12181f; --panel:#1a222c; --panel-2:#212c38; --line:#2e3a47;
+  --ink:#e6ecf2; --ink-dim:#8fa0b0; --ink-faint:#5d6d7c;
+  --gpu:#e8a33d; --waste:#e06c6c; --good:#6fbf73; --sel:#b08be8;
+  --r0:#5cc8d6; --r1:#b08be8; --r2:#e07aa8; --r3:#c9b458; --r4:#7fa0e8; --r5:#6fbf73;
+  --mono:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --code:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --r:4px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased}
+body{padding:20px 16px 64px;line-height:1.55}
+.wrap{max-width:1040px;margin:0 auto}
+
+/* --- masthead --- */
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-faint)}
+h1{font-family:var(--mono);font-weight:700;font-size:clamp(24px,5.5vw,38px);
+  line-height:1.15;margin:6px 0 8px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--gpu)}
+.standfirst{color:var(--ink-dim);max-width:56ch;margin:0 0 26px;font-size:15px}
+
+/* --- lesson --- */
+.lesson{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  padding:16px 18px;margin-bottom:22px}
+.lesson-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.step-no{font-family:var(--mono);font-size:11px;color:var(--sel);letter-spacing:.1em}
+.lesson h2{font-family:var(--mono);font-size:15px;margin:0;font-weight:700}
+.lesson p{margin:0 0 12px;font-size:14.5px;color:var(--ink-dim)}
+.lesson p strong{color:var(--ink);font-weight:500}
+.lesson code,.log code{font-family:var(--code);font-size:.92em;background:var(--panel-2);
+  padding:1px 5px;border-radius:3px;color:var(--ink)}
+.lesson-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font-family:var(--mono);font-size:12px;background:transparent;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:var(--r);padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-faint)}
+button:disabled{opacity:.35;cursor:default}
+button.try{border-color:var(--sel);color:var(--sel)}
+button.try:hover{background:rgba(176,139,232,.12)}
+:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+
+/* ============================================================================
+   THE SIGNATURE: the batch slots (is the GPU full?) above the KV cache
+   (is the memory full, and how much of it is actually holding anything?).
+   Those two pictures explain every number on the page.
+   ========================================================================= */
+.box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.cap{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-faint);padding:10px 12px 6px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+.cap .st{letter-spacing:.02em;text-transform:none}
+.cap button{padding:2px 8px;font-size:11px;letter-spacing:0;text-transform:none}
+.cap button.hot{border-color:var(--gpu);color:var(--gpu)}
+.stage{display:grid;grid-template-columns:1fr 300px;gap:12px;align-items:start}
+.knobs{display:flex;gap:5px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line);font-family:var(--code);font-size:10.5px;color:var(--ink-faint);align-items:center}
+.knobs .k{padding:2px 8px;font-size:10.5px}
+.knobs .k.on{border-color:var(--sel);color:var(--sel);background:rgba(176,139,232,.1)}
+.knobs .k.on.warn{border-color:var(--waste);color:var(--waste);background:rgba(224,108,108,.08)}
+.knobs .l{margin-left:6px;margin-right:2px}
+
+.slots{padding:10px 12px;display:grid;gap:4px}
+.slot{height:26px;border:1px solid var(--line);border-radius:3px;position:relative;overflow:hidden;background:var(--bg)}
+.slot.empty{border-style:dashed;border-color:rgba(224,108,108,.35)}
+.slot .fill{position:absolute;left:0;top:0;height:100%;opacity:.3}
+.slot .lb{position:absolute;left:6px;top:0;line-height:26px;font-family:var(--code);font-size:10px;color:var(--ink);white-space:nowrap}
+.slot .rb{position:absolute;right:6px;top:0;line-height:26px;font-family:var(--code);font-size:9.5px;color:var(--ink-faint)}
+.slot.empty .lb{color:var(--waste);opacity:.7}
+.slot.prefill{border-color:var(--gpu)}
+.slots .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+
+.kv{padding:8px 12px 10px;border-top:1px solid var(--line)}
+.kvgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(13px,1fr));gap:2px}
+.blk{aspect-ratio:1;border-radius:2px;background:var(--panel-2);min-height:11px}
+.blk.used{opacity:.95}
+.blk.res{opacity:.28;outline:1px dashed rgba(224,108,108,.5);outline-offset:-1px}
+.kvlbl{font-family:var(--code);font-size:10px;color:var(--ink-faint);margin-top:6px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.kvlbl b{color:var(--ink);font-weight:400} .kvlbl b.warn{color:var(--waste)}
+
+.queue{padding:8px 12px;border-top:1px solid var(--line);font-family:var(--code);font-size:10.5px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;min-height:38px}
+.rq{border:1px solid var(--line);border-radius:3px;padding:2px 6px;font-size:10px;white-space:nowrap}
+.rq.done{opacity:.4;border-style:dotted}
+.rq.run{border-width:2px}
+.rq.pre{border-color:var(--waste);color:var(--waste)}
+.queue .lg{color:var(--ink-faint);margin-right:4px}
+
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:8px;padding:10px 12px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line)}
+.metrics .k{color:var(--ink-faint);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+.metrics .v{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--ink)}
+.metrics .v.good{color:var(--good)} .metrics .v.bad{color:var(--waste)} .metrics .v.gpu{color:var(--gpu)}
+.expl{padding:0 12px 10px;font-family:var(--code);font-size:10px;color:var(--ink-faint);line-height:1.6}
+.expl b{color:var(--ink-dim);font-weight:400}
+.runs{padding:8px 12px 10px;font-family:var(--code);font-size:10.5px;color:var(--ink-dim);border-top:1px solid var(--line);display:flex;flex-direction:column;gap:3px}
+.runs .r{display:grid;grid-template-columns:118px 1fr 54px;gap:6px;align-items:center}
+.runs .r .b{height:6px;background:var(--panel-2);border-radius:2px;overflow:hidden} .runs .r .b i{display:block;height:100%;background:var(--good)}
+.runs .r .t{text-align:right;color:var(--ink)}
+.runs .none{color:var(--ink-faint)}
+.curve{padding:8px 12px 4px}
+.curve svg{display:block;width:100%;height:160px}
+.curve text{font-family:var(--code);font-size:9px;fill:var(--ink-faint)}
+.curve .ax{stroke:var(--line)}
+.curve path{fill:none;stroke-width:1.8}
+.curve .tp{stroke:var(--good)} .curve .lat{stroke:var(--gpu);stroke-dasharray:3 3;stroke-width:1.4}
+.curve .none{font-family:var(--code);font-size:11px;color:var(--ink-faint)}
+.cnote{font-family:var(--code);font-size:10px;color:var(--ink-faint);padding:0 12px 10px;line-height:1.5}
+
+/* --- terminal --- */
+.term{margin-top:14px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r)}
+.log{font-family:var(--code);font-size:12.5px;padding:12px 14px;max-height:220px;
+  overflow-y:auto;line-height:1.65}
+.log div{white-space:pre-wrap;word-break:break-word}
+.log .cmd{color:var(--ink)} .log .cmd::before{content:"$ ";color:var(--sel)}
+.log .dim{color:var(--ink-faint)} .log .ok{color:var(--ink-dim)}
+.log .g{color:var(--good)} .log .err{color:var(--waste)} .log .m{color:var(--sel)} .log .a{color:var(--gpu)}
+.prompt{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);
+  padding:0 14px}
+.prompt span{font-family:var(--code);color:var(--sel)}
+.prompt input{flex:1;background:transparent;border:none;color:var(--ink);
+  font-family:var(--code);font-size:13px;padding:12px 0;outline:none}
+.hintbar{font-family:var(--code);font-size:11.5px;color:var(--ink-faint);
+  padding:8px 2px 0}
+footer{margin-top:34px;font-size:12.5px;color:var(--ink-faint);max-width:62ch}
+footer code,footer a{font-family:var(--code);color:var(--ink-dim)}
+
+@media (max-width:820px){ .stage{grid-template-columns:1fr} }
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">Sandbox 09 · AI systems</p>
+  <h1>Serving a model is a <em>memory</em> problem wearing a compute costume</h1>
+  <p class="standfirst">Generating one token means reading every weight in the model out of
+  memory. That read costs the same whether you are serving one request or fifty, so the way to
+  make a GPU pay for itself is to have as many sequences as possible riding along on each read.
+  What stops you is not compute — it is the KV cache. Twenty-four requests arrive at once;
+  schedule them.</p>
+
+  <!-- lesson -->
+  <section class="lesson" id="lesson">
+    <div class="lesson-head">
+      <span class="step-no" id="step-no"></span>
+      <h2 id="step-title"></h2>
+    </div>
+    <p id="step-body"></p>
+    <div class="lesson-foot">
+      <button id="prev">← Back</button>
+      <button id="next">Next →</button>
+      <button class="try" id="try"></button>
+    </div>
+  </section>
+
+  <!-- signature -->
+  <div class="stage">
+    <div class="box">
+      <div class="cap"><span>The GPU</span><span><button id="stepbtn">step</button> <button id="runbtn">run</button> <button id="resetbtn">reset</button> <span class="st" id="clock"></span></span></div>
+      <div class="knobs" id="knobs"></div>
+      <div class="slots" id="slots"></div>
+      <div class="kv">
+        <div class="kvgrid" id="kvgrid"></div>
+        <div class="kvlbl" id="kvlbl"></div>
+      </div>
+      <div class="queue" id="queue"></div>
+      <div class="metrics" id="metrics"></div>
+      <div class="expl" id="expl"></div>
+    </div>
+    <div class="side" style="display:flex;flex-direction:column;gap:12px">
+      <div class="box">
+        <div class="cap"><span>Finished runs</span></div>
+        <div class="runs" id="runs"></div>
+      </div>
+      <div class="box">
+        <div class="cap"><span>Sweep · batch size</span><span class="st">green throughput, amber latency</span></div>
+        <div class="curve" id="curve"></div>
+        <div class="cnote" id="cnote"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal -->
+  <div class="term">
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="prompt">
+      <span>$</span>
+      <input id="input" autocomplete="off" autocapitalize="off" spellcheck="false"
+             aria-label="command" placeholder="run">
+    </div>
+  </div>
+  <p class="hintbar"><code>batch N</code> · <code>policy static|continuous</code> · <code>memory reserved|paged</code> ·
+  <code>kv N</code> · <code>step [n]</code> · <code>run</code> · <code>reset</code> · <code>sweep</code> · <code>help</code></p>
+
+  <footer>
+    <strong>Engine notes.</strong> Same shell as the other sandboxes. This is a real discrete
+    event simulation, not a scripted animation: a step's wall time is
+    <code>20ms + 0.15ms × batch + 0.05ms × prefill tokens</code>, which encodes the fact that
+    reading the weights dominates and each extra sequence in the batch is nearly free. KV cache
+    is allocated in 16-token blocks; <code>reserved</code> claims prompt + max_tokens on
+    admission the way a naive server does, <code>paged</code> grows a block at a time as vLLM
+    does. When a growing sequence finds no free block the newest running request is preempted
+    and recomputed from scratch, and the tokens it already produced are counted as wasted. The
+    twenty-four requests are a fixed seeded workload with prompts of 30–219 tokens and outputs
+    of 15–139, arriving together as a burst, so every configuration is compared on identical
+    work. Because they all arrive at once, end-to-end latency <em>falls</em> as the batch grows
+    — the cost of batching shows up as time per output token, which is the number to watch.
+  </footer>
+</div>
+
+<script>
+/* ============================================================================
+   1. THE MACHINE
+   ========================================================================= */
+const WEIGHT_MS = 20;   /* one pass over the model's weights — paid once per step */
+const DEC_MS = 0.15;    /* attention + sampling, per sequence in the batch */
+const PRE_MS = 0.05;    /* per prompt token, during prefill */
+const BLOCK = 16;       /* tokens per KV block */
+const NREQ = 24;
+
+function rng(seed) { let s = (seed >>> 0) || 1; return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; }; }
+function makeReqs() {
+  const r = rng(20260907); const out = [];
+  for (let i = 0; i < NREQ; i++) out.push({ id: i + 1, prompt: 30 + Math.floor(r() * 190), outLen: 15 + Math.floor(r() * 125),
+    gen: 0, state: "waiting", blocks: 0, ttft: null, end: null, preempted: 0, wasted: 0, prefill: false });
+  return out;
+}
+const MAXLEN = 140;     /* what a client declares as max_tokens, and what a naive server reserves */
+const blocksNeeded = (q, paged) => Math.ceil((q.prompt + (paged ? q.gen : MAXLEN)) / BLOCK);
+
+function newSim(cfg) { return { reqs: makeReqs(), used: 0, t: 0, steps: 0, preemptions: 0, wasted: 0,
+  slotSum: 0, kvSum: 0, liveSum: 0, done: false, at: { ...cfg } }; }
+
+/* one scheduler step, mutating the sim */
+function tick(sim, cfg) {
+  if (sim.done) return null;
+  const total = cfg.kvBlocks;
+  const running = () => sim.reqs.filter(q => q.state === "running");
+  const ev = [];
+  /* admission: continuous refills any free slot, static waits for the batch to drain */
+  if (cfg.policy === "continuous" || running().length === 0) {
+    for (const q of sim.reqs) {
+      if (q.state !== "waiting" || running().length >= cfg.maxBatch) continue;
+      const b = blocksNeeded({ ...q, gen: 0 }, cfg.paged);
+      /* A paged scheduler must leave headroom: every running sequence will want
+         another block within the next BLOCK tokens. Admitting to the last free
+         block is what turns a full cache into a preemption storm, so keep a
+         couple of blocks of growth room per sequence in hand. */
+      const headroom = cfg.paged ? 2 * (running().length + 1) : 0;
+      if (sim.used + b + headroom > total) continue;
+      sim.used += b; q.blocks = b; q.state = "running"; q.prefill = true;
+      ev.push({ text: `admitted r${q.id} (prompt ${q.prompt}, ${b} block${b > 1 ? "s" : ""}${cfg.paged ? "" : " reserved for " + MAXLEN + " output tokens"})`, cls: "ok" });
+    }
+  }
+  const run = running();
+  if (!run.length) { sim.done = true; return ev; }
+  const prefillToks = run.filter(q => q.prefill).reduce((a, q) => a + q.prompt, 0);
+  const dt = WEIGHT_MS + DEC_MS * run.length + PRE_MS * prefillToks;
+  sim.t += dt; sim.steps++;
+  sim.slotSum += run.length / cfg.maxBatch; sim.kvSum += sim.used / total;
+  sim.liveSum += run.reduce((a, q) => a + Math.ceil((q.prompt + q.gen) / BLOCK), 0) / total;
+  for (const q of run) {
+    q.prefill = false; q.gen++;
+    if (q.ttft === null) q.ttft = sim.t;
+    if (cfg.paged) {
+      const want = Math.ceil((q.prompt + q.gen) / BLOCK);
+      if (want > q.blocks) {
+        if (sim.used + (want - q.blocks) > total) {
+          /* out of memory: preempt the most recently admitted other request and recompute it later */
+          const victims = running().filter(x => x.id !== q.id).sort((a, b) => b.id - a.id);
+          const v = victims[0];
+          if (v) { const lost = v.gen; sim.used -= v.blocks; sim.wasted += lost; v.wasted += lost; v.blocks = 0; v.gen = 0; v.state = "waiting"; v.preempted++; sim.preemptions++;
+            ev.push({ text: `out of KV memory — preempted r${v.id}, discarding ${lost} token(s); it will be recomputed from scratch`, cls: "err" }); }
+        }
+        if (sim.used + (want - q.blocks) <= total) { sim.used += want - q.blocks; q.blocks = want; }
+      }
+    }
+    if (q.gen >= q.outLen) { q.state = "done"; q.end = sim.t; sim.used -= q.blocks; q.blocks = 0;
+      ev.push({ text: `r${q.id} finished — ${q.outLen} tokens in ${(q.end / 1000).toFixed(2)}s`, cls: "g" }); }
+  }
+  if (sim.reqs.every(q => q.state === "done")) sim.done = true;
+  return ev;
+}
+function metrics(sim, cfg) {
+  const done = sim.reqs.filter(q => q.end !== null);
+  const outTok = sim.reqs.reduce((a, q) => a + (q.end !== null ? q.outLen : q.gen), 0);
+  const secs = sim.t / 1000;
+  return {
+    secs, steps: sim.steps, outTok,
+    tps: secs > 0 ? outTok / secs : 0,
+    /* time per output token, as one user experiences it: the wall time of a
+       step, since every sequence in the batch advances by exactly one token */
+    tpot: sim.steps ? sim.t / sim.steps : 0,
+    ttft: done.length ? done.reduce((a, q) => a + q.ttft, 0) / done.length / 1000 : null,
+    lat: done.length ? done.reduce((a, q) => a + q.end, 0) / done.length / 1000 : null,
+    slot: sim.steps ? sim.slotSum / sim.steps : 0,
+    kv: sim.steps ? sim.kvSum / sim.steps : 0,
+    live: sim.steps ? sim.liveSum / sim.steps : 0,
+    preemptions: sim.preemptions, wasted: sim.wasted, doneN: done.length
+  };
+}
+function simulate(cfg) { const sim = newSim(cfg); let g = 0; while (!sim.done && g++ < 200000) tick(sim, cfg); return { sim, m: metrics(sim, cfg) }; }
+
+/* ============================================================================
+   2. STATE + COMMANDS
+   ========================================================================= */
+function initialState() { return { cfg: { maxBatch: 1, kvBlocks: 200, policy: "static", paged: false }, sim: null, runs: [], sweep: null }; }
+const clone = s => structuredClone(s);
+const line = (text, cls = "ok") => ({ text, cls });
+const fail = msg => ({ error: true, out: [line(msg, "err")] });
+const cfgLabel = c => `batch ${c.maxBatch} · ${c.policy} · ${c.paged ? "paged" : "reserved"} · ${c.kvBlocks} blocks`;
+const ensure = n => { if (!n.sim || JSON.stringify(n.sim.at) !== JSON.stringify(n.cfg)) n.sim = newSim(n.cfg); return n.sim; };
+function record(n) { const m = metrics(n.sim, n.cfg); if (!n.sim.done) return m;
+  n.runs.push({ label: `b${n.cfg.maxBatch} ${n.cfg.policy[0]}${n.cfg.paged ? "p" : "r"}${n.cfg.kvBlocks !== 200 ? " kv" + n.cfg.kvBlocks : ""}`, tps: m.tps, lat: m.lat, secs: m.secs, pre: m.preemptions }); return m; }
+
+const REGISTRY = {
+  "batch": (s, args) => { const v = +args[0]; if (!(v >= 1 && v <= 32)) return fail("batch 1–32"); const n = clone(s); n.cfg.maxBatch = v; n.sim = null;
+    return { state: n, out: [line(`max batch ${v}: up to ${v} sequences ride along on each pass over the weights`, "m")] }; },
+  "policy": (s, args) => { if (!/^(static|continuous)$/.test(args[0] || "")) return fail("policy static|continuous"); const n = clone(s); n.cfg.policy = args[0]; n.sim = null;
+    return { state: n, out: [line(args[0] === "static" ? "static: a batch runs to completion before the next one is admitted — every slot waits for the longest request" : "continuous: the moment a request finishes, a waiting one takes its slot", "m")] }; },
+  "memory": (s, args) => { if (!/^(reserved|paged)$/.test(args[0] || "")) return fail("memory reserved|paged"); const n = clone(s); n.cfg.paged = args[0] === "paged"; n.sim = null;
+    return { state: n, out: [line(n.cfg.paged ? `paged: blocks of ${BLOCK} tokens are allocated as the sequence actually grows` : `reserved: on admission a request claims prompt + ${MAXLEN} tokens, whether it uses them or not`, "m")] }; },
+  "kv": (s, args) => { const v = +args[0]; if (!(v >= 24 && v <= 400)) return fail("kv 24–400 blocks"); const n = clone(s); n.cfg.kvBlocks = v; n.sim = null;
+    return { state: n, out: [line(`${v} KV blocks = ${v * BLOCK} tokens of cache`, "m")] }; },
+  "step": (s, args) => { const k = Math.min(500, Math.max(1, +args[0] || 1)); const n = clone(s); ensure(n);
+    if (n.sim.done) n.sim = newSim(n.cfg);   /* a finished run starts over, so stepping always shows something */
+    const out = []; for (let i = 0; i < k && !n.sim.done; i++) { const ev = tick(n.sim, n.cfg) || []; ev.forEach(e => out.push(line("  " + e.text, e.cls))); }
+    const m = record(n);
+    out.unshift(line(`t = ${(n.sim.t / 1000).toFixed(2)}s · step ${n.sim.steps} · ${n.sim.reqs.filter(q => q.state === "running").length}/${n.cfg.maxBatch} slots · ${n.sim.used}/${n.cfg.kvBlocks} blocks`, "a"));
+    if (n.sim.done) out.push(line(`all ${m.doneN} requests done in ${m.secs.toFixed(2)}s — ${Math.round(m.tps)} tokens/s`, "g"));
+    return { state: n, out }; },
+  "run": s => { const n = clone(s); ensure(n); if (n.sim.done) n.sim = newSim(n.cfg);
+    let g = 0; while (!n.sim.done && g++ < 40000) tick(n.sim, n.cfg);
+    const m = record(n);
+    return { state: n, out: [line(`${cfgLabel(n.cfg)}`, "dim"),
+      line(`${m.doneN}/${NREQ} done in ${m.secs.toFixed(2)}s · ${Math.round(m.tps)} tokens/s · mean latency ${m.lat.toFixed(2)}s · mean time to first token ${m.ttft.toFixed(2)}s`, "g"),
+      line(`  slots ${Math.round(m.slot * 100)}% full on average · KV ${Math.round(m.kv * 100)}% allocated, ${Math.round(m.live * 100)}% actually holding tokens${m.preemptions ? ` · ${m.preemptions} preemption(s), ${m.wasted} tokens recomputed` : ""}`, m.preemptions ? "err" : "ok")] }; },
+  "reset": s => { const n = clone(s); n.sim = newSim(n.cfg); return { state: n, out: [line("clock reset, same workload", "dim")] }; },
+  "sweep": s => { const n = clone(s); const sizes = [1, 2, 4, 8, 12, 16, 24, 32];
+    n.sweep = sizes.map(b => { const { m } = simulate({ ...n.cfg, maxBatch: b }); return { b, tps: m.tps, lat: m.lat, tpot: m.tpot, pre: m.preemptions, slot: m.slot }; });
+    return { state: n, out: [line(`${n.cfg.policy} · ${n.cfg.paged ? "paged" : "reserved"} · ${n.cfg.kvBlocks} blocks`, "dim"),
+      line("batch   tokens/s   ms per token, per user   slots full", "dim"),
+      ...n.sweep.map(r => line(`${String(r.b).padStart(5)}   ${String(Math.round(r.tps)).padStart(8)}   ${(r.tpot.toFixed(1)).padStart(22)}   ${(Math.round(r.slot * 100) + "%").padStart(10)}${r.pre ? "  " + r.pre + " preemptions" : ""}`, "ok"))] }; },
+  "help": () => ({ out: [
+    line("batch N                   how many sequences may share one pass over the weights", "m"),
+    line("policy static|continuous  wait for the batch to drain, or refill slots as they free", "m"),
+    line("memory reserved|paged     claim prompt+max_tokens up front, or grow block by block", "m"),
+    line("kv N                      KV cache size in 16-token blocks", "m"),
+    line("step [n] · run · reset · sweep", "ok"),
+    line("restart", "dim")
+  ] }),
+  "restart": () => ({ state: initialState(), out: [line("sandbox reset", "dim")] })
+};
+function dispatch(state, raw) {
+  const w = raw.trim().split(/\s+/)[0]?.toLowerCase(); if (!w) return null;
+  if (REGISTRY[w]) return REGISTRY[w](state, raw.trim().split(/\s+/).slice(1).map(x => x.toLowerCase()), raw);
+  return fail(`${w}: not a command — try 'help'`);
+}
+
+/* ============================================================================
+   3. RENDERER
+   ========================================================================= */
+const rc = i => `var(--r${(i - 1) % 6})`;
+function render(s) {
+  const c = s.cfg, sim = s.sim;
+  d3.select("#knobs").html(
+    `<span class="l">batch</span>` + [1, 4, 8, 16, 32].map(v => `<button class="k${c.maxBatch === v ? " on" : ""}" data-c="batch ${v}">${v}</button>`).join("") +
+    `<span class="l">policy</span>` + ["static", "continuous"].map(v => `<button class="k${c.policy === v ? (v === "static" ? " on warn" : " on") : ""}" data-c="policy ${v}">${v}</button>`).join("") +
+    `<span class="l">memory</span>` + ["reserved", "paged"].map(v => `<button class="k${(c.paged ? "paged" : "reserved") === v ? (v === "reserved" ? " on warn" : " on") : ""}" data-c="memory ${v}">${v}</button>`).join("") +
+    `<span class="l">kv</span>` + [56, 96, 200, 400].map(v => `<button class="k${c.kvBlocks === v ? " on" : ""}" data-c="kv ${v}">${v}</button>`).join(""));
+  d3.selectAll("#knobs .k").on("click", function () { run(this.dataset.c); });
+  d3.select("#clock").text(sim ? `t = ${(sim.t / 1000).toFixed(2)}s · step ${sim.steps}${sim.done ? " · done" : ""}` : "not started");
+  d3.select("#stepbtn").classed("hot", !sim || !sim.done); d3.select("#runbtn").classed("hot", !sim || !sim.done);
+
+  /* batch slots */
+  const running = sim ? sim.reqs.filter(q => q.state === "running") : [];
+  const slots = [];
+  for (let i = 0; i < c.maxBatch; i++) { const q = running[i];
+    if (!q) slots.push(`<div class="slot empty"><span class="lb">slot ${i + 1} · empty</span></div>`);
+    else slots.push(`<div class="slot${q.prefill ? " prefill" : ""}"><div class="fill" style="width:${Math.min(100, q.gen / q.outLen * 100)}%;background:${rc(q.id)}"></div><span class="lb">r${q.id}${q.prefill ? " · prefill " + q.prompt + " tokens" : ` · ${q.gen}/${q.outLen} tokens`}</span><span class="rb">${Math.ceil((q.prompt + q.gen) / BLOCK)} blk</span></div>`); }
+  d3.select("#slots").html(c.maxBatch > 16 ? `<div style="grid-template-columns:1fr 1fr;display:grid;gap:4px">${slots.join("")}</div>` : slots.join(""));
+
+  /* KV cache */
+  const cells = [];
+  if (sim) { running.forEach(q => { const live = Math.ceil((q.prompt + q.gen) / BLOCK);
+      for (let b = 0; b < q.blocks; b++) cells.push(`<div class="blk ${b < live ? "used" : "res"}" style="background:${rc(q.id)}" title="r${q.id} ${b < live ? "in use" : "reserved, empty"}"></div>`); }); }
+  const free = Math.max(0, c.kvBlocks - (sim ? sim.used : 0));
+  for (let i = 0; i < free; i++) cells.push(`<div class="blk" title="free"></div>`);
+  d3.select("#kvgrid").html(cells.join(""));
+  const liveBlocks = running.reduce((a, q) => a + Math.ceil((q.prompt + q.gen) / BLOCK), 0);
+  const held = sim ? sim.used : 0;
+  d3.select("#kvlbl").html(`<span>KV cache <b>${held}</b>/${c.kvBlocks} blocks allocated${held > liveBlocks ? `, <b class="warn">${held - liveBlocks}</b> reserved and empty` : ""}</span><span>${c.kvBlocks * BLOCK} tokens total · ${BLOCK} per block</span>`);
+
+  /* queue */
+  const q2 = sim ? sim.reqs : [];
+  d3.select("#queue").html(`<span class="lg">requests</span>` + (q2.length ? q2.map(q => `<span class="rq ${q.state === "done" ? "done" : q.state === "running" ? "run" : ""}${q.preempted ? " pre" : ""}" style="border-color:${q.state === "waiting" ? "var(--line)" : rc(q.id)};color:${q.state === "done" ? "var(--ink-faint)" : rc(q.id)}" title="prompt ${q.prompt}, output ${q.outLen}${q.preempted ? `, preempted ${q.preempted}×` : ""}">r${q.id}${q.state === "running" ? ` ${q.gen}/${q.outLen}` : q.state === "done" ? " ✓" : ""}</span>`).join("") : `<span style="color:var(--ink-faint)">press step or run</span>`));
+
+  /* metrics */
+  const m = sim ? metrics(sim, c) : null;
+  d3.select("#metrics").html(!m ? "" : `
+    <div><div class="k">throughput</div><div class="v good">${Math.round(m.tps)}<span style="font-size:10px;color:var(--ink-faint)"> tok/s</span></div></div>
+    <div><div class="k">elapsed</div><div class="v">${m.secs.toFixed(2)}s</div></div>
+    <div><div class="k">per-user ms/token</div><div class="v ${m.tpot > 23 ? "bad" : ""}">${m.tpot.toFixed(1)}</div></div>
+    <div><div class="k">mean latency</div><div class="v">${m.lat === null ? "—" : m.lat.toFixed(2) + "s"}</div></div>
+    <div><div class="k">slots full</div><div class="v ${m.slot < 0.5 ? "bad" : m.slot > 0.85 ? "good" : ""}">${Math.round(m.slot * 100)}%</div></div>
+    <div><div class="k">KV holding tokens</div><div class="v ${m.kv - m.live > 0.25 ? "bad" : ""}">${Math.round(m.live * 100)}%</div></div>
+    <div><div class="k">preempted</div><div class="v ${m.preemptions ? "bad" : ""}">${m.preemptions}</div></div>`);
+  const stepMs = WEIGHT_MS + DEC_MS * Math.max(1, running.length) + 0;
+  d3.select("#expl").html(!sim ? `<b>step cost</b> = ${WEIGHT_MS}ms of weight reading + ${DEC_MS}ms per sequence + ${PRE_MS}ms per prefill token` :
+    `<b>this step</b> ≈ ${WEIGHT_MS}ms weights + ${(DEC_MS * running.length).toFixed(2)}ms for ${running.length} sequence(s) = <b>${stepMs.toFixed(1)}ms</b> — the same ${WEIGHT_MS}ms buys ${running.length} token(s) instead of one`);
+
+  /* runs + sweep */
+  const maxT = Math.max(1, ...s.runs.map(r => r.tps));
+  d3.select("#runs").html(s.runs.length ? s.runs.map(r => `<div class="r"><span>${r.label}</span><div class="b"><i style="width:${r.tps / maxT * 100}%;background:${r.pre ? "var(--waste)" : "var(--good)"}"></i></div><span class="t">${Math.round(r.tps)}</span></div>`).join("") + `<div style="color:var(--ink-faint);font-size:9.5px">tokens per second · red bars had preemptions</div>` : `<div class="none">finished runs line up here</div>`);
+  const S = s.sweep, cv = d3.select("#curve");
+  if (!S) { cv.html(`<div class="none">sweep runs every batch size at the current settings</div>`); d3.select("#cnote").text(""); }
+  else { const W = 300, H = 160, l = 30, r2 = 32, t = 12, b = 22;
+    const xs = d3.scalePoint().domain(S.map(x => String(x.b))).range([l, W - r2]);
+    const yt = d3.scaleLinear().domain([0, Math.max(...S.map(x => x.tps)) * 1.05]).range([H - b, t]);
+    const lo = Math.min(...S.map(x => x.tpot)), hi = Math.max(...S.map(x => x.tpot));
+    const yl = d3.scaleLinear().domain([lo - (hi - lo) * 0.3, hi + (hi - lo) * 0.3]).range([H - b, t]);
+    cv.html(`<svg viewBox="0 0 ${W} ${H}"><line class="ax" x1="${l}" x2="${W - r2}" y1="${H - b}" y2="${H - b}"/><line class="ax" x1="${l}" x2="${l}" y1="${t}" y2="${H - b}"/>
+      <path class="tp" d="${d3.line().x(d => xs(String(d.b))).y(d => yt(d.tps))(S)}"/>
+      <path class="lat" d="${d3.line().x(d => xs(String(d.b))).y(d => yl(d.tpot))(S)}"/>
+      ${S.map(x => `<text x="${xs(String(x.b))}" y="${H - 8}" text-anchor="middle">${x.b}</text>`).join("")}
+      <text x="${l - 3}" y="${t + 4}" text-anchor="end" fill="#6fbf73">${Math.round(Math.max(...S.map(x => x.tps)))}</text>
+      <text x="${W - r2 + 3}" y="${yl(hi) + 3}" fill="#e8a33d">${hi.toFixed(1)}ms</text>
+      <text x="${W - r2 + 3}" y="${yl(lo) + 3}" fill="#e8a33d">${lo.toFixed(1)}</text><text x="${l - 3}" y="${H - b}" text-anchor="end">0</text></svg>`);
+    const best = S.slice().sort((a, b2) => b2.tps - a.tps)[0]; const knee = S.find(x => x.tps > best.tps * 0.9);
+    d3.select("#cnote").text(`Throughput saturates at ${Math.round(best.tps)} tok/s; batch ${knee.b} already reaches 90% of that. Meanwhile each user's tokens slow from ${lo.toFixed(1)}ms to ${hi.toFixed(1)}ms apart. Server throughput and per-user speed pull in opposite directions — the knee is where you choose.`); }
+}
+
+/* ============================================================================
+   4. LESSON
+   ========================================================================= */
+const ran = s => !!s.sim && s.sim.done && JSON.stringify(s.sim.at) === JSON.stringify(s.cfg);
+const LESSON = [
+  { title: "One request at a time",
+    body: `The naive server: batch of one. Every step reads the entire model out of memory to
+    produce a single token for a single user, then does it again. Run the whole workload and
+    look at the throughput.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.cfg.maxBatch === 1 && !ran(s) },
+
+  { title: "Batching is nearly free",
+    body: `Around fifty tokens a second, and eleven requests spent the whole time waiting.
+    Now let eight sequences ride along on each pass over the weights. The weights are read once
+    either way — the only extra cost is a fraction of a millisecond of attention per sequence.`,
+    try: "batch 8", expect: /^batch 8$/,
+    needs: s => s.cfg.maxBatch !== 8 },
+
+  { title: "…run it",
+    body: `Watch the step cost line under the metrics: the same twenty milliseconds now buys
+    eight tokens instead of one. This is the single most important fact about serving language
+    models, and it is why nobody runs a GPU with one user on it.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.cfg.maxBatch === 8 && !ran(s) },
+
+  { title: "But the slots empty out",
+    body: `Look at "slots full" — well under 100%. Static batching admits eight requests and
+    then refuses to touch the queue until every one of them has finished, so the short requests
+    finish early and their slots sit idle while the longest one grinds on. Restart the clock and
+    stop two hundred steps in to catch it in the act.`,
+    try: "step 200", expect: /^step 200$/,
+    needs: s => s.cfg.maxBatch === 8 && s.cfg.policy === "static" && (!s.sim || s.sim.done) },
+
+  { title: "Continuous batching",
+    body: `The fix is obvious once you see the empty slots: don't wait for the batch. The moment
+    a sequence emits its last token, hand its slot to whoever is next in the queue.`,
+    try: "policy continuous", expect: /^policy continuous$/,
+    needs: s => s.cfg.policy !== "continuous" },
+
+  { title: "…run it",
+    body: `Slot occupancy climbs and the wall clock drops, on identical work. No new hardware,
+    no smaller model — just refusing to leave the GPU half empty.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.cfg.policy === "continuous" && s.cfg.maxBatch === 8 && !ran(s) },
+
+  { title: "Now raise the batch to sixteen",
+    body: `Four hundred and six tokens a second. Before going further, look at the KV cache
+    while it runs: the pale dashed blocks are memory that has been claimed but holds nothing.`,
+    try: "batch 16", expect: /^batch 16$/,
+    needs: s => s.cfg.maxBatch !== 16 },
+
+  { title: "…and look at the waste",
+    body: `Three quarters of the cache is allocated and only half of it holds a token. Every
+    admitted request claims enough room for its prompt <strong>plus the full 140 tokens it
+    might generate</strong>, on the chance that it does. Most requests stop long before that,
+    so a quarter of an expensive GPU's memory is being paid for and left empty.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.cfg.maxBatch === 16 && !s.cfg.paged && s.cfg.kvBlocks === 200 && !ran(s) },
+
+  { title: "Now shrink the GPU",
+    body: `On generous memory that waste is invisible — you have room to be sloppy. Cut the
+    cache to 96 blocks, which is what happens when the model gets bigger, the context gets
+    longer, or the finance team buys the cheaper card.`,
+    try: "kv 96", expect: /^kv 96$/,
+    needs: s => s.cfg.kvBlocks !== 96 },
+
+  { title: "…and it falls over",
+    body: `From 406 tokens a second to 214. Nothing about the model or the batch setting
+    changed; there is simply no longer room for enough worst-case reservations, so the GPU
+    sits half idle waiting for memory it is not using.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.cfg.kvBlocks === 96 && !s.cfg.paged && s.cfg.maxBatch === 16 && !ran(s) },
+
+  { title: "Paged attention",
+    body: `Stop reserving for the worst case. Hand out sixteen-token blocks as the sequence
+    actually grows, the way an operating system pages memory, and give them back the moment it
+    finishes. The scheduler keeps a little headroom in reserve so it never admits a request it
+    cannot feed.`,
+    try: "memory paged", expect: /^memory paged$/,
+    needs: s => !s.cfg.paged },
+
+  { title: "…299 instead of 214",
+    body: `Forty percent more throughput on the same hardware, the same model and the same
+    requests. The dashed waste is gone and the cache is nearly all live tokens. That gain came
+    from an allocator — which is the entire idea behind vLLM, and the reason a memory
+    allocator became one of the most consequential pieces of AI infrastructure.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.cfg.paged && s.cfg.kvBlocks === 96 && s.cfg.maxBatch === 16 && !ran(s) },
+
+  { title: "Paging is not infinite room",
+    body: `Squeeze harder — 56 blocks, under a thousand tokens of cache for sixteen slots. Now
+    even a careful scheduler will be caught out by sequences that keep growing.`,
+    try: "kv 56", expect: /^kv 56$/,
+    needs: s => s.cfg.kvBlocks !== 56 },
+
+  { title: "…preemption",
+    body: `When a running sequence needs a block and there is none, something must be evicted,
+    and everything it had already generated is thrown away and recomputed later — the red
+    counter, here two hundred tokens burnt for nothing. Throughput falls by almost half, from
+    299 to 168. This is why a real server would rather leave a request waiting in the queue
+    than admit it and then take it back.`,
+    try: "run", expect: /^run$/,
+    needs: s => s.cfg.kvBlocks === 56 && s.cfg.paged && !ran(s) },
+
+  { title: "Give the memory back",
+    body: `Back to a healthy cache.`,
+    try: "kv 200", expect: /^kv 200$/,
+    needs: s => s.cfg.kvBlocks !== 200 },
+
+  { title: "What batching actually costs",
+    body: `Sweep every batch size. Throughput climbs steeply and then flattens — there is
+    little point past sixteen here. The amber line is what each individual user feels: the gap
+    between their tokens, which is just the step time, and it rises with every sequence added to
+    the batch — 20.2ms alone against 22.1ms sharing with thirty-one others. Server throughput
+    and per-user speed pull against each other, and picking a batch size is choosing between
+    them.`,
+    try: "sweep", expect: /^sweep$/,
+    needs: s => !s.sweep },
+
+  { title: "Free play",
+    body: `<code>help</code> lists everything. Try <code>policy static</code> with paged memory
+    to confirm the two fixes are independent; <code>reset</code> then <code>step 1</code>
+    repeatedly to watch a prefill step cost visibly more than a decode step; or
+    <code>kv 80</code> with paging, where the headroom rule misjudges the workload and does
+    worse than reserving — a reminder that admission control is a heuristic, not a theorem.`,
+    try: "help", expect: /.*/ }
+];
+
+/* ============================================================================
+   5. WIRING
+   ========================================================================= */
+let state = initialState();
+let step = 0;
+let history = [], hpos = 0;
+const logEl = document.getElementById("log");
+
+function log(text, cls) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function run(raw, { quiet = false } = {}) {
+  if (!raw.trim()) return;
+  if (!quiet) log(raw, "cmd");
+  const res = dispatch(state, raw);
+  if (!res) return;
+  const changed = !!res.state && JSON.stringify(res.state) !== JSON.stringify(state);
+  if (res.state) state = res.state;
+  if (quiet) return;
+  (res.out || []).forEach(o => log(o.text, o.cls));
+  render(state);
+  const s = LESSON[step];
+  if (s && s.expect && s.expect.test(raw.trim()) && !res.error && (changed || s.readonly)
+      && step < LESSON.length - 1) {
+    setTimeout(() => { step++; renderLesson(); }, 550);
+  }
+}
+
+function renderLesson() {
+  const s = LESSON[step];
+  if (s.needs && !s.needs(state)) {
+    log(`(sandbox: replaying steps 1–${step} to set up "${s.title}")`, "dim");
+    run("restart", { quiet: true });
+    LESSON.slice(0, step).forEach(p => run(p.try, { quiet: true }));
+    render(state);
+  }
+  document.getElementById("step-no").textContent =
+    String(step + 1).padStart(2, "0") + " / " + String(LESSON.length).padStart(2, "0");
+  document.getElementById("step-title").textContent = s.title;
+  document.getElementById("step-body").innerHTML = s.body;
+  document.getElementById("try").textContent = s.try;
+  document.getElementById("prev").disabled = step === 0;
+  document.getElementById("next").disabled = step === LESSON.length - 1;
+}
+
+document.getElementById("prev").onclick = () => { step--; renderLesson(); };
+document.getElementById("next").onclick = () => { step++; renderLesson(); };
+document.getElementById("try").onclick = () => {
+  const i = document.getElementById("input");
+  i.value = LESSON[step].try; i.focus();
+};
+document.getElementById("stepbtn").onclick = () => run("step");
+document.getElementById("runbtn").onclick = () => run("run");
+document.getElementById("resetbtn").onclick = () => run("reset");
+
+const input = document.getElementById("input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const v = input.value;
+    if (v.trim()) { history.push(v); hpos = history.length; }
+    run(v); input.value = "";
+  } else if (e.key === "ArrowUp") {
+    if (hpos > 0) { hpos--; input.value = history[hpos]; e.preventDefault(); }
+  } else if (e.key === "ArrowDown") {
+    if (hpos < history.length - 1) { hpos++; input.value = history[hpos]; }
+    else { hpos = history.length; input.value = ""; }
+  }
+});
+
+render(state);
+renderLesson();
+log("Serving sandbox loaded. Type 'help', or: run", "dim");
+</script>
+</body>
+</html>

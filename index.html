@@ -135,7 +135,11 @@ const VIZ = [
   { topic: "ml", path: "ai/retrieval.html", title: "Near is not the same as useful",
     blurb: `Chunks on a similarity map, a question dropped onto it, and the trade-offs
             measured: chunks that split the answer, chunks that cost a fortune, words that
-            don't match, k that buys nothing, and the two-stage fix.` }
+            don't match, k that buys nothing, and the two-stage fix.` },
+  { topic: "ml", path: "ai/inference-serving.html", title: "The GPU is waiting on memory",
+    blurb: `Schedule twenty-four requests onto one GPU. Batching is nearly free, static
+            batching wastes slots, and the KV cache — not compute — is what caps everything.
+            Paged allocation, preemption, and the throughput knee.` }
 ];
 
 /* --------------------------------------------------------------------------- */
