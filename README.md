@@ -20,9 +20,7 @@ Interactive D3 visualisations of technical concepts that are easier to see than 
 | 02 | AI systems | [ai/transformer.html](ai/transformer.html) | Attention as a weighted lookup: scores, causal mask, softmax and temperature, head types (sink, duplicate, induction, pronoun), the residual stream, and the KV cache |
 | 03 | AI systems | [ai/diffusion.html](ai/diffusion.html) | Diffusion on a 2D point cloud: fixed forward noising on a cosine schedule, the exact Bayes denoiser as the model, DDIM sampling, step count, classifier-free guidance, memorisation vs generalisation |
 | 04 | AI systems | [ai/post-training.html](ai/post-training.html) | Post-training on a categorical policy over seven answers: SFT cross-entropy, Bradley-Terry reward model from biased labeler comparisons, RLHF policy gradient with a KL leash, reward hacking, the closed-form optimum, DPO |
-
 | 01 | Spark | [spark/lazy-plans.html](spark/lazy-plans.html) | Lazy evaluation, the logical plan, a four-rule optimizer (filter merge, predicate pushdown, column pruning, projection collapse), exchanges, stages, tasks, shuffle partitions, broadcast joins |
-
 | 02 | Spark | [spark/shuffle.html](spark/shuffle.html) | A tick-driven scheduler: driver, executors and cores, tasks per partition, the timeline, the 200-partition default, adaptive coalescing, broadcast vs sort-merge, skew and the straggler, AQE skew split, caching |
 
 Candidates for the next round: DNS resolution, TLS handshake, B-tree indexes, consistent
